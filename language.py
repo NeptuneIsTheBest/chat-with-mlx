@@ -78,13 +78,18 @@ MULTI_LANGUAGE = {
                 },
                 "Button": {
                     "submit": {
-                        "submit_value": "Submit",
-                        "stop_value": "Stop"
+                        "value": "Submit"
+                    },
+                    "stop": {
+                        "value": "Stop"
                     }
                 },
                 "Textbox": {
-                    "input_output": {
-                        "label": "Completion",
+                    "prompt": {
+                        "label": "Prompt"
+                    },
+                    "output": {
+                        "label": "Output"
                     }
                 }
             }
