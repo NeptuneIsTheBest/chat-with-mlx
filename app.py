@@ -41,6 +41,10 @@ def handle_chat(message: Dict,
         if system_prompt and system_prompt.strip() != "":
             history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
 
+        temperature = float(temperature)
+        top_p = float(top_p)
+        repetition_penalty = float(repetition_penalty)
+
         if not stream:
             return ChatMessage(role="assistant",
                                content=model.generate_response(
@@ -54,7 +58,7 @@ def handle_chat(message: Dict,
                                )
         else:
             response = ChatMessage(role="assistant", content="")
-            eos_token = [model.tokenizer.eos_token]
+            eos_token = model.tokenizer.eos_token
             for chunk in model.generate_response(
                     message=message,
                     history=history,
@@ -63,13 +67,12 @@ def handle_chat(message: Dict,
                     top_p=top_p,
                     max_tokens=max_tokens,
                     repetition_penalty=repetition_penalty):
-                if chunk not in eos_token:
+                if eos_token not in chunk:
                     response.content += chunk
                     yield response
     except Exception as e:
         raise gr.Error(str(e))
 
-completion_output_state = gr.State(value=True)
 
 def handle_completion(prompt: str,
                       temperature: float = 0.7,
@@ -79,6 +82,10 @@ def handle_completion(prompt: str,
                       stream: bool = True):
     try:
         model = completion_model_manager.get_loaded_model()
+
+        temperature = float(temperature)
+        top_p = float(top_p)
+        repetition_penalty = float(repetition_penalty)
 
         if not stream:
             return prompt + model.generate_completion(
@@ -90,7 +97,7 @@ def handle_completion(prompt: str,
                 repetition_penalty=repetition_penalty)
         else:
             response = prompt
-            eos_token = [model.tokenizer.eos_token]
+            eos_token = model.tokenizer.eos_token
             for chunk in model.generate_completion(
                     prompt=prompt,
                     stream=stream,
@@ -98,7 +105,7 @@ def handle_completion(prompt: str,
                     top_p=top_p,
                     max_tokens=max_tokens,
                     repetition_penalty=repetition_penalty):
-                if chunk not in eos_token and completion_output_state.value:
+                if eos_token not in chunk:
                     response += chunk
                     yield response
     except Exception as e:
@@ -113,23 +120,24 @@ def completion_load_model_callback(model_name: str):
     return completion_load_model_block.load_model(model_name)[0]
 
 
-with gr.Blocks(fill_height=True, fill_width=True) as app:
+with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     gr.HTML("<h1>Chat with MLX</h1>")
 
     with gr.Tab(get_text("Tab.chat")):
         with gr.Row():
             with gr.Column(scale=2):
-                gr.Markdown(f"## {get_text('Page.Chat.Markdown.configuration')}")
+                with gr.Row():
+                    gr.Markdown(f"## {get_text('Page.Chat.Markdown.configuration')}")
 
-                chat_load_model_block.render_all()
-                chat_load_model_block.load_model_button.click(
-                    fn=chat_load_model_callback,
-                    inputs=[chat_load_model_block.model_selector_dropdown],
-                    outputs=[
-                        chat_load_model_block.model_status_textbox,
-                        chat_system_prompt_block.system_prompt_textbox
-                    ]
-                )
+                    chat_load_model_block.render_all()
+                    chat_load_model_block.load_model_button.click(
+                        fn=chat_load_model_callback,
+                        inputs=[chat_load_model_block.model_selector_dropdown],
+                        outputs=[
+                            chat_load_model_block.model_status_textbox,
+                            chat_system_prompt_block.system_prompt_textbox
+                        ]
+                    )
 
                 with gr.Accordion(label=get_text("Page.Chat.Accordion.AdvancedSetting.label"), open=False):
                     chat_advanced_setting_block.render_all()
@@ -173,8 +181,9 @@ with gr.Blocks(fill_height=True, fill_width=True) as app:
                     ]
                 )
 
-                with gr.Accordion(label=get_text("Page.Chat.Accordion.AdvancedSetting.label"), open=True):
-                    completion_advanced_setting_block.render_all()
+                with gr.Row(visible=False):
+                    with gr.Accordion(label=get_text("Page.Chat.Accordion.AdvancedSetting.label"), open=True):
+                        completion_advanced_setting_block.render_all()
 
             with gr.Column(scale=8):
                 completion_textbox = gr.Textbox(lines=25, render=False)
@@ -183,17 +192,17 @@ with gr.Blocks(fill_height=True, fill_width=True) as app:
                     flagging_mode="never",
                     fn=handle_completion,
                     inputs=[
-                        "textbox"
-                    ],
-                    outputs=[
-                        "textbox"
-                    ],
-                    additional_inputs=[
+                        gr.Textbox(lines=10, show_copy_button=True, render=True, label=get_text("Page.Completion.Textbox.prompt.label")),
                         completion_advanced_setting_block.temperature_slider,
                         completion_advanced_setting_block.top_p_slider,
                         completion_advanced_setting_block.max_tokens_slider,
                         completion_advanced_setting_block.repetition_penalty_slider
-                    ]
+                    ],
+                    outputs=[
+                        gr.Textbox(lines=25, show_copy_button=True, render=True, label=get_text("Page.Completion.Textbox.output.label"))
+                    ],
+                    submit_btn=get_text("Page.Completion.Button.submit.value"),
+                    stop_btn=get_text("Page.Completion.Button.stop.value"),
                 )
 
     with gr.Tab(get_text("Tab.model_manager"), interactive=True):
