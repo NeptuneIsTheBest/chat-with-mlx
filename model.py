@@ -155,6 +155,7 @@ class ModelManager:
             raise IOError("Models folder exists but is not a directory structure as expected.")
 
         self.model: Optional[Model] = None
+        self.model_config: Optional[Dict[str, str]] = None
         self.model_configs: Dict[str, Dict[str, str]] = self.scan_models()
 
     def get_config_path(self, model_config: Dict[str, str]) -> Path:
@@ -200,6 +201,7 @@ class ModelManager:
         if self.model:
             self.model.close()
             self.model = None
+            self.model_config = None
 
         model_config = self.model_configs.get(model_name)
         if not model_config:
@@ -216,10 +218,11 @@ class ModelManager:
 
         try:
             self.model = Model(str(local_model_path))
+            self.model_config = model_config
         except Exception as e:
             raise RuntimeError(f"Failed to load model from '{local_model_path}': {e}")
 
-        system_prompt = model_config.get("system_prompt")
+        system_prompt = self.model_config.get("system_prompt")
         return model_name, system_prompt
 
     def get_loaded_model(self) -> Model:
@@ -230,3 +233,9 @@ class ModelManager:
 
     def get_model_list(self) -> list:
         return list(self.model_configs.keys())
+
+    def get_system_prompt(self) -> str:
+        if self.model:
+            return self.model_config.get("system_prompt")
+        else:
+            raise RuntimeError("No model loaded.")
