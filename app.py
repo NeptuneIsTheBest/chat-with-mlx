@@ -21,12 +21,6 @@ completion_system_prompt_block = ChatSystemPromptBlock()
 completion_load_model_block = LoadModelBlock(model_manager=completion_model_manager)
 completion_advanced_setting_block = AdvancedSettingBlock()
 
-chatbot = gr.Chatbot(
-    type="messages",
-    render=False,
-    show_copy_button=True,
-)
-
 
 def handle_chat(message: Dict,
                 history: List[Dict],
@@ -149,7 +143,23 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 with gr.Row(equal_height=True):
                     chat_system_prompt_block.render_all()
 
-                chatbot.render()
+                chatbot = gr.Chatbot(
+                    type="messages",
+                    show_copy_button=True,
+                    render=False,
+                    latex_delimiters=[
+                        {"left": "$$", "right": "$$", "display": True},
+                        {"left": "$", "right": "$", "display": False},
+                        {"left": "\\(", "right": "\\)", "display": False},
+                        {"left": "\\begin{equation}", "right": "\\end{equation}", "display": True},
+                        {"left": "\\begin{align}", "right": "\\end{align}", "display": True},
+                        {"left": "\\begin{alignat}", "right": "\\end{alignat}", "display": True},
+                        {"left": "\\begin{gather}", "right": "\\end{gather}", "display": True},
+                        {"left": "\\begin{CD}", "right": "\\end{CD}", "display": True},
+                        {"left": "\\[", "right": "\\]", "display": True}
+                    ]
+                )
+
                 gr.ChatInterface(
                     multimodal=True,
                     chatbot=chatbot,
