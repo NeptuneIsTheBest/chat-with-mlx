@@ -10,11 +10,19 @@ In addition, plans are in place to add visual capabilities to VLM.
 
 ## Project Status
 
-The project is currently under development, and only the most basic chat part has been completed.
+### Functions implemented
+
+* [x] Chat
+* [x] Completion
+* [ ] RAG
+
+### To be continued
+
+The project is currently under development.
 
 Currently, you can only create a configuration file manually. After the creation is completed, the model file can be automatically downloaded from HuggingFace.
 
-RAG and Competition functions have not yet been implemented. The model management page has not yet been implemented.
+RAG and model management functions have not yet been implemented.
 
 ## Usage
 
