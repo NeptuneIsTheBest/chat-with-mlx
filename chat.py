@@ -6,7 +6,9 @@ from model import ModelManager, LoadModelStatus
 
 
 class ChatSystemPromptBlock(ComponentsBlock):
-    def __init__(self):
+    def __init__(self, model_manager: ModelManager):
+        self.model_manager = model_manager
+
         self.system_prompt_textbox = gr.Textbox(
             label=get_text("Page.Chat.ChatSystemPromptBlock.Textbox.system_prompt.label"),
             placeholder=get_text("Page.Chat.ChatSystemPromptBlock.Textbox.system_prompt.placeholder"),
@@ -24,6 +26,12 @@ class ChatSystemPromptBlock(ComponentsBlock):
     def render_all(self):
         self.system_prompt_textbox.render()
         self.default_system_prompt_button.render()
+
+    def get_system_prompt_text(self):
+        try:
+            return self.model_manager.get_system_prompt()
+        except Exception as e:
+            gr.Error(str(e))
 
 
 class LoadModelBlock(ComponentsBlock):
@@ -67,7 +75,7 @@ class AdvancedSettingBlock(ComponentsBlock):
         self.temperature_slider = gr.Slider(
             minimum=0.0,
             maximum=2.0,
-            value=0.95,
+            value=0.7,
             label=get_text("Page.Chat.Accordion.AdvancedSetting.Slider.temperature.label"),
             render=False,
             interactive=True
