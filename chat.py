@@ -2,7 +2,7 @@ import gradio as gr
 
 from components_block import ComponentsBlock
 from language import get_text
-from model import ModelManager, LoadModelStatus
+from model import ModelManager
 
 
 class ChatSystemPromptBlock(ComponentsBlock):
@@ -12,6 +12,7 @@ class ChatSystemPromptBlock(ComponentsBlock):
         self.system_prompt_textbox = gr.Textbox(
             label=get_text("Page.Chat.ChatSystemPromptBlock.Textbox.system_prompt.label"),
             placeholder=get_text("Page.Chat.ChatSystemPromptBlock.Textbox.system_prompt.placeholder"),
+            value=self.model_manager.get_system_prompt,
             lines=3,
             show_copy_button=True,
             render=False,
@@ -27,12 +28,6 @@ class ChatSystemPromptBlock(ComponentsBlock):
         self.system_prompt_textbox.render()
         self.default_system_prompt_button.render()
 
-    def get_system_prompt_text(self):
-        try:
-            return self.model_manager.get_system_prompt()
-        except Exception as e:
-            gr.Error(str(e))
-
 
 class LoadModelBlock(ComponentsBlock):
     def __init__(self, model_manager: ModelManager):
@@ -41,11 +36,12 @@ class LoadModelBlock(ComponentsBlock):
         self.model_selector_dropdown = gr.Dropdown(
             label=get_text("Page.Chat.LoadModelBlock.Dropdown.model_selector.label"),
             choices=self.model_manager.get_model_list(),
+            value=self.update_select_model_dropdown_value,
             render=False,
             interactive=True
         )
         self.model_status_textbox = gr.Textbox(
-            value=LoadModelStatus.NOT_LOADED.value,
+            value=self.get_load_model_status,
             show_label=False,
             render=False,
             interactive=False,
@@ -61,13 +57,17 @@ class LoadModelBlock(ComponentsBlock):
         self.model_status_textbox.render()
         self.load_model_button.render()
 
-    def load_model(self, model_name: str):
-        try:
-            model_name_loaded, system_prompt = self.model_manager.load_model(model_name)
-            status_text = LoadModelStatus.LOADED.value.format(model_name_loaded)
-            return status_text, system_prompt
-        except Exception as e:
-            raise gr.Error(str(e))
+    def update_select_model_dropdown_value(self):
+        if self.model_manager.get_loaded_model_config():
+            return self.model_manager.get_loaded_model_config().get("display_name")
+        else:
+            return self.model_manager.get_model_list()[0]
+
+    def get_load_model_status(self):
+        if self.model_manager.get_loaded_model_config():
+            return get_text("Page.Chat.LoadModelBlock.Textbox.model_status.loaded_value").format(self.model_manager.get_loaded_model_config().get("display_name"))
+        else:
+            return get_text("Page.Chat.LoadModelBlock.Textbox.model_status.not_loaded_value")
 
 
 class AdvancedSettingBlock(ComponentsBlock):
