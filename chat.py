@@ -28,6 +28,12 @@ class ChatSystemPromptBlock(ComponentsBlock):
         self.system_prompt_textbox.render()
         self.default_system_prompt_button.render()
 
+    def get_system_prompt_text(self):
+        try:
+            return self.model_manager.get_system_prompt()
+        except Exception as e:
+            gr.Error(str(e))
+
 
 class LoadModelBlock(ComponentsBlock):
     def __init__(self, model_manager: ModelManager):

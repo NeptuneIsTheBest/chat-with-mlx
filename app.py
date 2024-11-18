@@ -11,12 +11,14 @@ from model import Message, MessageRole, ModelManager, Model
 
 model_manager = ModelManager()
 
+
 chat_system_prompt_block = ChatSystemPromptBlock(model_manager=model_manager)
 chat_load_model_block = LoadModelBlock(model_manager=model_manager)
 chat_advanced_setting_block = AdvancedSettingBlock()
 chat_rag_setting_block = RAGSettingBlock()
 
 completion_load_model_block = LoadModelBlock(model_manager=model_manager)
+
 completion_advanced_setting_block = AdvancedSettingBlock()
 
 
@@ -186,7 +188,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                         fn=model_manager.set_custom_prompt,
                         inputs=[chat_system_prompt_block.system_prompt_textbox]
                     )
-
+                    
                 chatbot = gr.Chatbot(
                     type="messages",
                     show_copy_button=True,
