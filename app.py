@@ -1,24 +1,32 @@
 import argparse
 import atexit
-from typing import Dict, List
+from typing import Dict, List, Tuple
 
 import gradio as gr
 from gradio.components.chatbot import ChatMessage
 
 from chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
 from language import get_text
-from model import Message, MessageRole, ModelManager
+from model import Message, MessageRole, ModelManager, Model
 
-chat_model_manager = ModelManager()
-completion_model_manager = ModelManager()
+model_manager = ModelManager()
 
-chat_system_prompt_block = ChatSystemPromptBlock(model_manager=chat_model_manager)
-chat_load_model_block = LoadModelBlock(model_manager=chat_model_manager)
+
+chat_system_prompt_block = ChatSystemPromptBlock(model_manager=model_manager)
+chat_load_model_block = LoadModelBlock(model_manager=model_manager)
 chat_advanced_setting_block = AdvancedSettingBlock()
 chat_rag_setting_block = RAGSettingBlock()
 
-completion_load_model_block = LoadModelBlock(model_manager=completion_model_manager)
+completion_load_model_block = LoadModelBlock(model_manager=model_manager)
+
 completion_advanced_setting_block = AdvancedSettingBlock()
+
+
+def get_loaded_model() -> Model:
+    model = model_manager.get_loaded_model()
+    if model is None:
+        raise RuntimeError("No model loaded.")
+    return model
 
 
 def handle_chat(message: Dict,
@@ -30,7 +38,7 @@ def handle_chat(message: Dict,
                 repetition_penalty: float = 1.0,
                 stream: bool = True):
     try:
-        model = chat_model_manager.get_loaded_model()
+        model = get_loaded_model()
         if system_prompt and system_prompt.strip() != "":
             history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
 
@@ -74,7 +82,7 @@ def handle_completion(prompt: str,
                       repetition_penalty: float = 1.0,
                       stream: bool = True):
     try:
-        model = completion_model_manager.get_loaded_model()
+        model = get_loaded_model()
 
         temperature = float(temperature)
         top_p = float(top_p)
@@ -105,12 +113,34 @@ def handle_completion(prompt: str,
         raise gr.Error(str(e))
 
 
+def get_load_model_status():
+    if model_manager.get_loaded_model_config():
+        return get_text("Page.Chat.LoadModelBlock.Textbox.model_status.loaded_value").format(model_manager.get_loaded_model_config().get("display_name"))
+    else:
+        return get_text("Page.Chat.LoadModelBlock.Textbox.model_status.not_loaded_value")
+
+
+def load_model(model_name: str) -> Tuple[str, str]:
+    try:
+        model_manager.load_model(model_name)
+        return get_load_model_status(), model_manager.get_system_prompt(default=True)
+    except Exception as e:
+        gr.Error(str(e))
+
+
 def chat_load_model_callback(model_name: str):
-    return chat_load_model_block.load_model(model_name)
+    return load_model(model_name)
 
 
 def completion_load_model_callback(model_name: str):
-    return completion_load_model_block.load_model(model_name)[0]
+    return load_model(model_name)[0]
+
+
+def get_default_system_prompt_callback():
+    if model_manager.get_loaded_model_config():
+        return model_manager.get_system_prompt(default=True)
+    else:
+        raise gr.Error("No model loaded.")
 
 
 with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
@@ -123,6 +153,11 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     gr.Markdown(f"## {get_text('Page.Chat.Markdown.configuration')}")
 
                     chat_load_model_block.render_all()
+                    chat_load_model_block.model_selector_dropdown.select(
+                        fn=lambda x: x,
+                        inputs=[chat_load_model_block.model_selector_dropdown],
+                        outputs=[completion_load_model_block.model_selector_dropdown]
+                    )
                     chat_load_model_block.load_model_button.click(
                         fn=chat_load_model_callback,
                         inputs=[chat_load_model_block.model_selector_dropdown],
@@ -130,6 +165,10 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                             chat_load_model_block.model_status_textbox,
                             chat_system_prompt_block.system_prompt_textbox
                         ]
+                    ).then(
+                        fn=lambda x: x,
+                        inputs=[chat_load_model_block.model_status_textbox],
+                        outputs=[completion_load_model_block.model_status_textbox]
                     )
 
                 with gr.Accordion(label=get_text("Page.Chat.Accordion.AdvancedSetting.label"), open=False):
@@ -142,10 +181,14 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 with gr.Row(equal_height=True):
                     chat_system_prompt_block.render_all()
                     chat_system_prompt_block.default_system_prompt_button.click(
-                        fn=chat_system_prompt_block.get_system_prompt_text,
+                        fn=get_default_system_prompt_callback,
                         outputs=[chat_system_prompt_block.system_prompt_textbox]
                     )
-
+                    chat_system_prompt_block.system_prompt_textbox.change(
+                        fn=model_manager.set_custom_prompt,
+                        inputs=[chat_system_prompt_block.system_prompt_textbox]
+                    )
+                    
                 chatbot = gr.Chatbot(
                     type="messages",
                     show_copy_button=True,
@@ -186,12 +229,21 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 gr.Markdown(f"## {get_text('Page.Chat.Markdown.configuration')}")
 
                 completion_load_model_block.render_all()
+                completion_load_model_block.model_selector_dropdown.select(
+                    fn=lambda x: x,
+                    inputs=[completion_load_model_block.model_selector_dropdown],
+                    outputs=[chat_load_model_block.model_selector_dropdown]
+                )
                 completion_load_model_block.load_model_button.click(
                     fn=completion_load_model_callback,
                     inputs=[completion_load_model_block.model_selector_dropdown],
                     outputs=[
                         completion_load_model_block.model_status_textbox
                     ]
+                ).then(
+                    fn=lambda x: x,
+                    inputs=[completion_load_model_block.model_status_textbox],
+                    outputs=[chat_load_model_block.model_status_textbox]
                 )
 
                 with gr.Row(visible=False):
@@ -223,11 +275,8 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
 
 
 def exit_handler():
-    if chat_model_manager.model:
-        chat_model_manager.model.close()
-
-    if completion_model_manager.model:
-        completion_model_manager.model.close()
+    if model_manager.get_loaded_model():
+        model_manager.close_model()
 
 
 atexit.register(exit_handler)

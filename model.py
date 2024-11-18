@@ -2,15 +2,12 @@ import enum
 import gc
 import json
 import logging
-import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Union, List, Tuple, Optional
+from typing import Dict, Union, List, Optional
 
 from huggingface_hub import snapshot_download
 from mlx_lm import load, generate, stream_generate
-
-from language import get_text
 
 
 class MessageRole(enum.Enum):
@@ -136,23 +133,18 @@ class Model:
         gc.collect()
 
 
-class LoadModelStatus(enum.Enum):
-    NOT_LOADED = get_text("Page.Chat.LoadModelBlock.Textbox.model_status.not_loaded_value")
-    LOADED = get_text("Page.Chat.LoadModelBlock.Textbox.model_status.loaded_value")
-
-
 class ModelManager:
-    def __init__(self, models_folder: Optional[str] = None):
-        self.models_folder = Path(models_folder) if models_folder else Path(os.getenv("MODELS_PATH", "./models"))
+    def __init__(self, base_dir: Optional[str] = None):
+        self.base_dir = Path(base_dir) if base_dir else Path("./models")
+        self.configs_dir = self.base_dir / "configs"
+        self.models_dir = self.base_dir / "models"
 
-        self.configs_folder = self.models_folder / "configs"
-        self.models_folder_path = self.models_folder / "models"
-        self.models_folder.mkdir(parents=True, exist_ok=True)
-        self.configs_folder.mkdir(parents=True, exist_ok=True)
-        self.models_folder_path.mkdir(parents=True, exist_ok=True)
+        self.base_dir.mkdir(parents=True, exist_ok=True)
+        self.configs_dir.mkdir(parents=True, exist_ok=True)
+        self.models_dir.mkdir(parents=True, exist_ok=True)
 
-        if not (self.models_folder.is_dir() and self.configs_folder.is_dir() and self.models_folder_path.is_dir()):
-            raise IOError("Models folder exists but is not a directory structure as expected.")
+        if not (self.base_dir.is_dir() and self.configs_dir.is_dir() and self.models_dir.is_dir()):
+            raise IOError("Failed to create the required directory structure.")
 
         self.model: Optional[Model] = None
         self.model_config: Optional[Dict[str, str]] = None
@@ -160,27 +152,53 @@ class ModelManager:
 
     def get_config_path(self, model_config: Dict[str, str]) -> Path:
         mlx_repo = model_config.get("mlx_repo")
-        if mlx_repo is None:
-            raise RuntimeError(f"'mlx_repo' not specified for model '{model_config.get("model_name")}'.")
-        return Path(self.configs_folder, "{}.json".format(mlx_repo))
+        if not mlx_repo:
+            model_name = model_config.get('model_name', 'unknown')
+            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
+        mlx_repo_name = mlx_repo.strip().split('/')[-1]
+        return self.configs_dir / f"{mlx_repo_name}.json"
 
     def get_model_path(self, model_config: Dict[str, str]) -> Path:
         mlx_repo = model_config.get("mlx_repo")
-        if mlx_repo is None:
-            raise RuntimeError(f"'mlx_repo' not specified for model '{model_config.get("model_name")}'.")
-        mlx_repo = mlx_repo.strip()
-        mlx_repo_name = mlx_repo.split("/")[-1]
-        model_path = Path(self.models_folder_path, mlx_repo_name)
-        return model_path
+        if not mlx_repo:
+            model_name = model_config.get('model_name', 'unknown')
+            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
+        mlx_repo_name = mlx_repo.strip().split('/')[-1]
+        return self.models_dir / mlx_repo_name
 
-    def create_config(self, model_config: Dict[str, str]):
-        model_config_json = json.dumps(model_config)
-        with open(self.get_config_path(model_config), "w") as f:
-            f.write(model_config_json)
+    def get_model_list(self) -> List[str]:
+        return sorted(self.model_configs.keys())
+
+    def create_config_json(self, model_config: Dict[str, str]):
+        config_path = self.get_config_path(model_config)
+        with config_path.open("w", encoding="utf-8") as f:
+            json.dump(model_config, f, ensure_ascii=False, indent=4)
+
+    def add_config(
+            self,
+            original_repo: str,
+            mlx_repo: str,
+            model_name: Optional[str] = None,
+            quantize: Optional[str] = None,
+            default_language: str = "multi",
+            system_prompt: Optional[str] = None
+    ):
+        model_config = {
+            "original_repo": original_repo,
+            "mlx_repo": mlx_repo,
+            "model_name": model_name if model_name else mlx_repo.strip().split("/")[-1],
+            "quantize": quantize,
+            "default_language": default_language,
+            "system_prompt": system_prompt
+        }
+        self.create_config_json(model_config)
+        display_name = f"{model_config['model_name']}({default_language},{quantize})"
+        model_config["display_name"] = display_name
+        self.model_configs[display_name] = model_config
 
     def scan_models(self) -> Dict[str, Dict[str, str]]:
         model_configs = {}
-        for config_file in self.configs_folder.glob("*.json"):
+        for config_file in self.configs_dir.glob("*.json"):
             if config_file.is_file():
                 try:
                     with config_file.open("r", encoding="utf-8") as f:
@@ -191,17 +209,16 @@ class ModelManager:
                     if not all([model_name, default_language, quantize]):
                         logging.info(f"Skipping incomplete config: {config_file}")
                         continue
-                    key = f"{model_name}({default_language},{quantize})"
-                    model_configs[key] = model_config
+                    display_name = f"{model_name}({default_language},{quantize})"
+                    model_config["display_name"] = display_name
+                    model_configs[display_name] = model_config
                 except json.JSONDecodeError as e:
                     logging.error(f"Error decoding JSON from {config_file}: {e}")
         return model_configs
 
-    def load_model(self, model_name: str) -> Tuple[str, Optional[str]]:
+    def load_model(self, model_name: str):
         if self.model:
-            self.model.close()
-            self.model = None
-            self.model_config = None
+            self.close_model()
 
         model_config = self.model_configs.get(model_name)
         if not model_config:
@@ -211,7 +228,6 @@ class ModelManager:
         if not local_model_path.exists():
             mlx_repo = model_config.get("mlx_repo")
             try:
-                local_model_path.mkdir(parents=True, exist_ok=True)
                 snapshot_download(repo_id=mlx_repo, local_dir=str(local_model_path))
             except Exception as e:
                 raise RuntimeError(f"Failed to download model from '{mlx_repo}': {e}")
@@ -222,20 +238,27 @@ class ModelManager:
         except Exception as e:
             raise RuntimeError(f"Failed to load model from '{local_model_path}': {e}")
 
-        system_prompt = self.model_config.get("system_prompt")
-        return model_name, system_prompt
-
-    def get_loaded_model(self) -> Model:
+    def close_model(self):
         if self.model:
-            return self.model
-        else:
-            raise RuntimeError("No model loaded.")
+            self.model.close()
+            del self.model
+            gc.collect()
+            self.model = None
+            self.model_config = None
 
-    def get_model_list(self) -> list:
-        return list(self.model_configs.keys())
+    def get_loaded_model(self) -> Optional[Model]:
+        return self.model
 
-    def get_system_prompt(self) -> str:
-        if self.model:
+    def get_loaded_model_config(self) -> Optional[Dict[str, str]]:
+        return self.model_config
+
+    def get_system_prompt(self, default=False) -> Optional[str]:
+        if self.model_config:
+            if not default and "custom_system_prompt" in self.model_config:
+                return self.model_config.get("custom_system_prompt")
             return self.model_config.get("system_prompt")
-        else:
-            raise RuntimeError("No model loaded.")
+        return None
+
+    def set_custom_prompt(self, custom_system_prompt: str):
+        if self.model_config:
+            self.model_config["custom_system_prompt"] = custom_system_prompt
