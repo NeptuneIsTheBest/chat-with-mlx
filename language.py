@@ -5,7 +5,7 @@ MULTI_LANGUAGE = {
         "Tab": {
             "chat": "Chat",
             "completion": "Completion",
-            "model_manager": "Model Manager",
+            "model_management": "Model Management",
         },
         "Page": {
             "Chat": {
@@ -90,6 +90,48 @@ MULTI_LANGUAGE = {
                     },
                     "output": {
                         "label": "Output"
+                    }
+                }
+            },
+            "ModelManagement": {
+                "Dataframe": {
+                    "model_list": {
+                        "headers": "Models"
+                    }
+                },
+                "AddModelBlock": {
+                    "Textbox": {
+                        "model_name": {
+                            "label": "Model name",
+                            "placeholder": "If empty, it will be set to the repository name of MLX Community."
+                        },
+                        "original_repo": {
+                            "label": "Original Repository",
+                            "placeholder": "The original repository. It should look like microsoft/Phi-3.5-vision-instruct."
+                        },
+                        "mlx_repo": {
+                            "label": "MLX Community Repository",
+                            "placeholder": "The MLX community Repository. It should look like mlx-community/Phi-3.5-vision-instruct-8bit."
+                        },
+                        "default_system_prompt": {
+                            "label": "Default System Prompt",
+                        }
+                    },
+                    "Dropdown": {
+                        "quantize": {
+                            "label": "Quantize"
+                        },
+                        "default_language": {
+                            "label": "Default Language"
+                        },
+                        "multimodal_ability": {
+                            "label": "Multimodal Ability"
+                        }
+                    },
+                    "Button": {
+                        "add": {
+                            "value": "Add model"
+                        }
                     }
                 }
             }

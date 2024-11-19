@@ -167,6 +167,7 @@ class ModelManager:
         return self.models_dir / mlx_repo_name
 
     def get_model_list(self) -> List[str]:
+        self.model_configs: Dict[str, Dict[str, str]] = self.scan_models()
         return sorted(self.model_configs.keys())
 
     def create_config_json(self, model_config: Dict[str, str]):
@@ -181,15 +182,29 @@ class ModelManager:
             model_name: Optional[str] = None,
             quantize: Optional[str] = None,
             default_language: str = "multi",
-            system_prompt: Optional[str] = None
+            system_prompt: Optional[str] = None,
+            multimodal_ability: Optional[List[str]] = None,
     ):
+        if len(original_repo.strip().split("/")) != 2 or len(mlx_repo.strip().split("/")) != 2:
+            raise RuntimeError("'original_repo' or 'mlx_repo' not in compliance with the specification.")
+        if quantize not in ["None", "4bit", "8bit", "bf16", "bf32"]:
+            raise RuntimeError("quantize must be one of 'None', '4bit', '8bit', 'bf16', 'bf32'")
+        if default_language not in ["multi"]:
+            raise RuntimeError("default_language must be one of 'multi'")
+        if system_prompt and system_prompt.strip() == "":
+            system_prompt = None
+        if multimodal_ability:
+            for ability in multimodal_ability:
+                if ability not in ["None", "vision"]:
+                    raise RuntimeError("multimodal_ability must be one of 'None', 'vision'")
         model_config = {
-            "original_repo": original_repo,
-            "mlx_repo": mlx_repo,
-            "model_name": model_name if model_name else mlx_repo.strip().split("/")[-1],
-            "quantize": quantize,
+            "original_repo": original_repo.strip(),
+            "mlx_repo": mlx_repo.strip(),
+            "model_name": model_name.strip() if model_name and model_name.strip() != "" else mlx_repo.strip().split("/")[-1],
+            "quantize": None if quantize == "None" else quantize,
             "default_language": default_language,
-            "system_prompt": system_prompt
+            "system_prompt": system_prompt,
+            "multimodal_ability": [] if multimodal_ability == ["None"] else multimodal_ability
         }
         self.create_config_json(model_config)
         display_name = f"{model_config['model_name']}({default_language},{quantize})"
@@ -205,7 +220,7 @@ class ModelManager:
                         model_config = json.load(f)
                     model_name = model_config.get("model_name")
                     default_language = model_config.get("default_language")
-                    quantize = model_config.get("quantize")
+                    quantize = model_config.get("quantize") if model_config.get("quantize") else "None"
                     if not all([model_name, default_language, quantize]):
                         logging.info(f"Skipping incomplete config: {config_file}")
                         continue
