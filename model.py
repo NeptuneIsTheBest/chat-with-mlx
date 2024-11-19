@@ -71,7 +71,7 @@ class Model:
 
     def generate_response(
             self,
-            message: Dict,
+            message: str,
             history: Union[str, List[Dict]],
             stream: bool = False,
             temperature: float = 0.7,
@@ -79,7 +79,7 @@ class Model:
             max_tokens: int = 512,
             repetition_penalty: float = 1.0
     ):
-        message = [Message(MessageRole.USER, message["text"]).to_dict()]
+        message = [Message(MessageRole.USER, message).to_dict()]
 
         conversation = history + message
 
