@@ -1,16 +1,17 @@
 import argparse
 import atexit
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import gradio as gr
+import pandas as pd
 from gradio.components.chatbot import ChatMessage
 
 from chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
 from language import get_text
 from model import Message, MessageRole, ModelManager, Model
+from model_management import AddModelBlock
 
 model_manager = ModelManager()
-
 
 chat_system_prompt_block = ChatSystemPromptBlock(model_manager=model_manager)
 chat_load_model_block = LoadModelBlock(model_manager=model_manager)
@@ -20,6 +21,8 @@ chat_rag_setting_block = RAGSettingBlock()
 completion_load_model_block = LoadModelBlock(model_manager=model_manager)
 
 completion_advanced_setting_block = AdvancedSettingBlock()
+
+model_management_add_model_block = AddModelBlock(model_manager=model_manager)
 
 
 def get_loaded_model() -> Model:
@@ -46,31 +49,19 @@ def handle_chat(message: Dict,
         top_p = float(top_p)
         repetition_penalty = float(repetition_penalty)
 
-        if not stream:
-            return ChatMessage(role="assistant",
-                               content=model.generate_response(
-                                   message=message,
-                                   history=history,
-                                   stream=stream,
-                                   temperature=temperature,
-                                   top_p=top_p,
-                                   max_tokens=max_tokens,
-                                   repetition_penalty=repetition_penalty)
-                               )
-        else:
-            response = ChatMessage(role="assistant", content="")
-            eos_token = model.tokenizer.eos_token
-            for chunk in model.generate_response(
-                    message=message,
-                    history=history,
-                    stream=stream,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty):
-                if eos_token not in chunk:
-                    response.content += chunk
-                    yield response
+        response = ChatMessage(role="assistant", content="")
+        eos_token = model.tokenizer.eos_token
+        for chunk in model.generate_response(
+                message=message,
+                history=history,
+                stream=stream,
+                temperature=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                repetition_penalty=repetition_penalty):
+            if eos_token not in chunk:
+                response.content += chunk
+                yield response
     except Exception as e:
         raise gr.Error(str(e))
 
@@ -143,6 +134,21 @@ def get_default_system_prompt_callback():
         raise gr.Error("No model loaded.")
 
 
+def update_model_management_models_list():
+    return pd.DataFrame({get_text("Page.ModelManagement.Dataframe.model_list.headers"): model_manager.get_model_list()})
+
+
+def update_model_selector_choices():
+    return gr.update(choices=model_manager.get_model_list())
+
+
+def add_model(model_name: Optional[str], original_repo: str, mlx_repo: str, quantize: str, default_language: str, default_system_prompt: Optional[str], multimodal_ability: List[str]):
+    try:
+        model_manager.add_config(original_repo, mlx_repo, model_name, quantize, default_language, default_system_prompt, multimodal_ability)
+    except Exception as e:
+        raise gr.Error(str(e))
+
+
 with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     gr.HTML("<h1>Chat with MLX</h1>")
 
@@ -188,7 +194,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                         fn=model_manager.set_custom_prompt,
                         inputs=[chat_system_prompt_block.system_prompt_textbox]
                     )
-                    
+
                 chatbot = gr.Chatbot(
                     type="messages",
                     show_copy_button=True,
@@ -224,7 +230,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
 
     with gr.Tab(get_text("Tab.completion"), interactive=True):
         with gr.Row():
-            advanced_setting_accordion = None
             with gr.Column(scale=2):
                 gr.Markdown(f"## {get_text('Page.Chat.Markdown.configuration')}")
 
@@ -270,8 +275,66 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     stop_btn=get_text("Page.Completion.Button.stop.value"),
                 )
 
-    with gr.Tab(get_text("Tab.model_manager"), interactive=True):
-        gr.Markdown("# Not implemented yet.")
+    model_list = gr.Dataframe(
+        headers=[get_text("Page.ModelManagement.Dataframe.model_list.headers")],
+        value=update_model_management_models_list(),
+        datatype=["str"],
+        row_count=(10, "dynamic"),
+        render=False,
+        interactive=False
+    )
+
+    with gr.Tab(get_text("Tab.model_management"), interactive=True):
+        with gr.Row(equal_height=True):
+            with gr.Column(scale=5):
+                model_list.render()
+
+            with gr.Column(scale=5):
+                model_management_add_model_block.render_all()
+                model_management_add_model_block.add_button.click(
+                    fn=add_model,
+                    inputs=[
+                        model_management_add_model_block.model_name_textbox,
+                        model_management_add_model_block.original_repo_textbox,
+                        model_management_add_model_block.mlx_repo_textbox,
+                        model_management_add_model_block.quantize_dropdown,
+                        model_management_add_model_block.default_language_dropdown,
+                        model_management_add_model_block.default_system_prompt_textbox,
+                        model_management_add_model_block.multimodal_ability_dropdown
+                    ]
+                ).then(
+                    fn=update_model_selector_choices,
+                    outputs=[
+                        chat_load_model_block.model_selector_dropdown
+                    ]
+                ).then(
+                    fn=update_model_selector_choices,
+                    outputs=[
+                        completion_load_model_block.model_selector_dropdown
+                    ]
+                ).then(
+                    fn=update_model_management_models_list,
+                    outputs=[
+                        model_list
+                    ]
+                )
+
+    app.load(
+        fn=update_model_selector_choices,
+        outputs=[
+            chat_load_model_block.model_selector_dropdown
+        ]
+    ).then(
+        fn=update_model_selector_choices,
+        outputs=[
+            completion_load_model_block.model_selector_dropdown
+        ]
+    ).then(
+        fn=update_model_management_models_list,
+        outputs=[
+            model_list
+        ]
+    )
 
 
 def exit_handler():
