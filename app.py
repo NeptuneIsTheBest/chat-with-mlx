@@ -1,9 +1,13 @@
 import argparse
 import atexit
+import copy
+import hashlib
+from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 import gradio as gr
 import pandas as pd
+import pypdf
 from gradio.components.chatbot import ChatMessage
 
 from chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
@@ -32,6 +36,69 @@ def get_loaded_model() -> Model:
     return model
 
 
+def get_file_md5(file_name: Path) -> str:
+    md5 = hashlib.md5()
+    with open(file_name, "rb") as f:
+        for chunk in iter(lambda: f.read(4096), b""):
+            md5.update(chunk)
+    return md5.hexdigest()
+
+
+class FileManager:
+    def __init__(self):
+        self.files = {}
+
+    def load_file(self, file_name: Path):
+        if file_name.name in self.files:
+            if self.files[file_name.name]["md5"] == get_file_md5(file_name):
+                return self.files[file_name.name]["content"]
+        if file_name.suffix.lower() == ".pdf":
+            return self.load_pdf(file_name)
+        elif file_name.suffix.lower() in [".txt", ".csv", ".md"]:
+            return self.load_txt_like(file_name)
+
+    def load_pdf(self, file_name: Path):
+        pdf = pypdf.PdfReader(file_name)
+        markdown_content = "{" + "file: {}, content: ".format(file_name)
+        for page in pdf.pages:
+            markdown_content += page.extract_text()
+        markdown_content += "}"
+        self.files[file_name.name] = {"md5": get_file_md5(file_name), "content": markdown_content}
+        return self.files[file_name.name]["content"]
+
+    def load_txt_like(self, file_name: Path):
+        pass
+
+
+file_manager = FileManager()
+
+
+def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]]:
+    processed_message = ""
+    if "files" in message:
+        for file in message["files"]:
+            processed_message += file_manager.load_file(Path(file))
+    processed_message += message["text"]
+    preprocessed_history = []
+    i = 0
+    while i < len(history):
+        current_history = copy.deepcopy(history[i])
+        if isinstance(current_history["content"], tuple):
+            for file in current_history["content"]:
+                current_history["content"] = file_manager.load_file(Path(file))
+                if i + 1 < len(history):
+                    next_history = copy.deepcopy(history[i + 1])
+                    current_history["content"] += next_history["content"]
+                    i += 1
+                preprocessed_history.append(current_history)
+                current_history = copy.deepcopy(history[i])
+            i += 1
+            continue
+        preprocessed_history.append(current_history)
+        i += 1
+    return processed_message, preprocessed_history
+
+
 def handle_chat(message: Dict,
                 history: List[Dict],
                 system_prompt: str = None,
@@ -44,6 +111,8 @@ def handle_chat(message: Dict,
         model = get_loaded_model()
         if system_prompt and system_prompt.strip() != "":
             history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
+
+        message, history = preprocess_file(message, history)
 
         temperature = float(temperature)
         top_p = float(top_p)
