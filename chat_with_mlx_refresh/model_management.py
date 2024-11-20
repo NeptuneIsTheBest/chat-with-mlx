@@ -1,8 +1,8 @@
 import gradio as gr
 
-from components_block import ComponentsBlock
-from language import get_text
-from model import ModelManager
+from .components_block import ComponentsBlock
+from .language import get_text
+from .model import ModelManager
 
 
 class AddModelBlock(ComponentsBlock):

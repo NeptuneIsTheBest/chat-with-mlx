@@ -1,8 +1,8 @@
 import gradio as gr
 
-from components_block import ComponentsBlock
-from language import get_text
-from model import ModelManager
+from .components_block import ComponentsBlock
+from .language import get_text
+from .model import ModelManager
 
 
 class ChatSystemPromptBlock(ComponentsBlock):
@@ -67,7 +67,7 @@ class LoadModelBlock(ComponentsBlock):
         if self.model_manager.get_loaded_model_config():
             return self.model_manager.get_loaded_model_config().get("display_name")
         else:
-            return self.model_manager.get_model_list()[0]
+            return self.model_manager.get_model_list()[0] if len(self.model_manager.get_model_list()) > 0 else None
 
     def get_load_model_status(self):
         if self.model_manager.get_loaded_model_config():

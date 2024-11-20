@@ -1,0 +1,11 @@
+include README.md
+include LICENSE
+
+include requirements.txt
+
+prune models
+
+prune .venv
+prune __pycache__
+
+prune .gradio

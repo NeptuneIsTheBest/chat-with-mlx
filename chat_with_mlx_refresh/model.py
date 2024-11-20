@@ -135,7 +135,7 @@ class Model:
 
 class ModelManager:
     def __init__(self, base_dir: Optional[str] = None):
-        self.base_dir = Path(base_dir) if base_dir else Path("./models")
+        self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent / "models"
         self.configs_dir = self.base_dir / "configs"
         self.models_dir = self.base_dir / "models"
 
