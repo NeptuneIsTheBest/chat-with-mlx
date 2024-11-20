@@ -10,10 +10,10 @@ import pandas as pd
 import pypdf
 from gradio.components.chatbot import ChatMessage
 
-from chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
-from language import get_text
-from model import Message, MessageRole, ModelManager, Model
-from model_management import AddModelBlock
+from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
+from .language import get_text
+from .model import Message, MessageRole, ModelManager, Model
+from .model_management import AddModelBlock
 
 model_manager = ModelManager()
 
@@ -414,15 +414,33 @@ def exit_handler():
 atexit.register(exit_handler)
 
 
-def start(port, share=False, in_browser=True):
+def start(port: int, share: bool = False, in_browser: bool = True) -> None:
+    print(f"Starting the app on port {port} with share={share} and in_browser={in_browser}")
     app.launch(server_port=port, inbrowser=in_browser, share=share)
 
 
-if __name__ == "__main__":
-    parser = argparse.ArgumentParser(
-        description="Chat with MLX"
+def main():
+    parser = argparse.ArgumentParser(description="Chat with MLX")
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=7860,
+        help="The port number to run the application on (default: 7860)"
     )
-    parser.add_argument("--port", type=int, default=7860)
-    parser.add_argument("--share", action="store_true")
+    parser.add_argument(
+        "--share",
+        action="store_true",
+        help="Enable sharing the application link externally"
+    )
+    parser.add_argument(
+        "--no-browser",
+        action="store_true",
+        help="Do not open the application in the default web browser"
+    )
     args = parser.parse_args()
-    start(args.port, share=args.share)
+
+    start(port=args.port, share=args.share, in_browser=not args.no_browser)
+
+
+if __name__ == "__main__":
+    main()
