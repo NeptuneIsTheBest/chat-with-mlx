@@ -1,81 +1,82 @@
 # Chat with MLX
 
-Run LLM on your Mac!
+**Run LLM on your Mac!** An all-in-one chat Web UI based on the MLX framework, designed for Apple Silicon.
 
 **chat-with-mlx** is based on [qnguyen3/chat-with-mlx](https://github.com/qnguyen3/chat-with-mlx) and provides similar functionality.
 
-A web UI is provided for using LLM chat or completion, and for using RAG search. 
+In addition, we plan to add the ability to upload pictures for chatting to the multimodal model.
 
-In addition, plans are in place to add visual capabilities to VLM. 
+If this helps you, I'd be happy if you could give me a star, thank you. ✨
 
-## Project Status
+## TLDR
+Use the following commands to install and run::
+```bash
+python -m venv chat-with-mlx
+cd chat-with-mlx
+. ./bin/activate
+pip install git+https://github.com/NeptuneIsTheBest/chat-with-mlx.git
+chat-with-mlx
+```
 
-### Functions implemented
+## Roadmap
 
+### Key Features
 * [x] Chat
 * [x] Completion
+* [x] Model Management
 * [ ] RAG
 
-### To be continued
+### Others
+* [x] Upload file to chat（Now, the function of uploading PDF has been implemented）
+* [ ] Upload picture to chat
+* [ ] and so on...
 
-The project is currently under development.
-
-Currently, you can only create a configuration file manually. After the creation is completed, the model file can be automatically downloaded from HuggingFace.
-
-RAG and model management functions have not yet been implemented.
-
-## Usage
+## How to use
 
 ### Installation
 
-1. Clone the repository:
+1. Install using pip:
    ```bash
-   git clone https://github.com/NeptuneIsTheBest/chat-with-mlx.git
+   python -m venv chat-with-mlx
    cd chat-with-mlx
+   . ./bin/activate
+   pip install git+https://github.com/NeptuneIsTheBest/chat-with-mlx.git
    ```
 
-2. Install the required dependencies:
+### Run
+
+2. Start the server:
    ```bash
-   pip install -r requirements.txt
+   chat-with-mlx
    ```
-
-### Running the Server
-
-You can start the chat server by running the following Python script:
-
-```bash
-python app.py
-```
 
 - `--port`: The port on which the server will run (default is `7860`).
 - `--share`: If specified, the server will be shared publicly.
 
+3. Use in browser: By default, a page will open, http://127.0.0.1:7890, where you can chat.
+
 ### Model Configuration
 
-Currently, you can create model configurations in the following ways:
-
-1. Create a corresponding configuration file in the `./models/configs/` directory.
-
-Here is an example configuration file for **Llama-3.2-3B-Instruct-4bit**:
-
-**Llama-3.2-3B-Instruct-4bit.json**
+**Ministral-8B-Instruct-2410-4bit.json**
 ```json
 {
-  "model_name": "Llama-3.2-3B-Instruct",
-  "original_repo": "meta-llama/Llama-3.2-3B-Instruct",
-  "mlx_repo": "mlx-community/Llama-3.2-3B-Instruct-4bit",
-  "quantize": "4bit",
-  "default_language": "multi",
-  "system_prompt": "You are a useful assistant. Please reason step by step."
+    "original_repo": "mistralai/Ministral-8B-Instruct-2410",
+    "mlx_repo": "mlx-community/Ministral-8B-Instruct-2410-4bit",
+    "model_name": "Ministral-8B-Instruct-2410-4bit",
+    "quantize": "4bit",
+    "default_language": "multi",
+    "system_prompt": "",
+    "multimodal_ability": []
 }
 ```
 
-- `model_name`: The name of the model.
 - `original_repo`: The original repository where the model can be found.
 - `mlx_repo`: The repository in the MLX community.
+- `model_name`: The name of the model.
 - `quantize`: The quantization format of the model (e.g., `4bit`).
 - `default_language`: Default language setting (e.g., `multi` for multilingual support).
-- `system_prompt`: The initial prompt that sets the behavior of the model.
+- `system_prompt`: The system prompt of the model.
+- `multimodal_ability`: The multimodal capabilities of the model.
 
 ## Contributing
 
