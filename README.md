@@ -9,7 +9,7 @@ In addition, we plan to add the ability to upload pictures for chatting to the m
 If this helps you, I'd be happy if you could give me a star, thank you. ✨
 
 ## TLDR
-Use the following commands to install and run::
+Use the following commands to install and run:
 ```bash
 python -m venv chat-with-mlx
 cd chat-with-mlx
