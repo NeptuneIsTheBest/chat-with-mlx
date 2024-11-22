@@ -53,7 +53,9 @@ chat-with-mlx
 - `--port`: The port on which the server will run (default is `7860`).
 - `--share`: If specified, the server will be shared publicly.
 
-3. Use in browser: By default, a page will open, http://127.0.0.1:7890, where you can chat.
+### Use
+
+3. Use in browser: By default, a page will open, http://127.0.0.1:7860, where you can chat.
 
 ### Model Configuration
 
