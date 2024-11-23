@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="chat-with-mlx-refresh",
-    version="0.1.0",
+    version="0.1.1",
     author="NeptuneIsTheBest",
     author_email="13058097081a@gmail.com",
     description="An all-in-one chat Web UI based on the MLX framework, designed for Apple Silicon.",
@@ -20,6 +20,6 @@ setup(
     entry_points={
         "console_scripts": [
             "chat-with-mlx=chat_with_mlx_refresh.app:main",
-        ],
-    },
+        ]
+    }
 )

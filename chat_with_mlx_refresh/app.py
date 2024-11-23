@@ -389,6 +389,11 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 )
 
     app.load(
+        fn=update_model_management_models_list,
+        outputs=[
+            model_list
+        ]
+    ).then(
         fn=update_model_selector_choices,
         outputs=[
             chat_load_model_block.model_selector_dropdown
@@ -397,11 +402,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         fn=update_model_selector_choices,
         outputs=[
             completion_load_model_block.model_selector_dropdown
-        ]
-    ).then(
-        fn=update_model_management_models_list,
-        outputs=[
-            model_list
         ]
     )
 
