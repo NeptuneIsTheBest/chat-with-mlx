@@ -26,15 +26,13 @@ class Message:
 
 
 class Model:
-    def __init__(self, model_path: str, max_tokens: int = 4096, ):
+    def __init__(self, model_path: str):
         self.model_path = model_path
-        self.max_tokens = max_tokens
 
         self.model, self.tokenizer = self._load_model()
 
     def _load_model(self):
         try:
-            # Replace with actual model loading code
             model, tokenizer = load(self.model_path)
             return model, tokenizer
         except Exception as e:

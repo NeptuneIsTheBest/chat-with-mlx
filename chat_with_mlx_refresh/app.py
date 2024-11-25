@@ -77,7 +77,8 @@ def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]
     processed_message = ""
     if "files" in message:
         for file in message["files"]:
-            processed_message += file_manager.load_file(Path(file))
+            file_content = file_manager.load_file(Path(file))
+            processed_message += file_content if file_content else ""
     processed_message += message["text"]
     preprocessed_history = []
     i = 0
@@ -85,10 +86,11 @@ def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]
         current_history = copy.deepcopy(history[i])
         if isinstance(current_history["content"], tuple):
             for file in current_history["content"]:
-                current_history["content"] = file_manager.load_file(Path(file))
+                file_content = file_manager.load_file(Path(file))
+                current_history["content"] = file_content if file_content else ""
                 if i + 1 < len(history):
                     next_history = copy.deepcopy(history[i + 1])
-                    current_history["content"] += next_history["content"]
+                    current_history["content"] += next_history["content"] if next_history else ""
                     i += 1
                 preprocessed_history.append(current_history)
                 current_history = copy.deepcopy(history[i])
@@ -185,7 +187,7 @@ def load_model(model_name: str) -> Tuple[str, str]:
         model_manager.load_model(model_name)
         return get_load_model_status(), model_manager.get_system_prompt(default=True)
     except Exception as e:
-        gr.Error(str(e))
+        raise gr.Error(str(e))
 
 
 def chat_load_model_callback(model_name: str):
@@ -208,7 +210,7 @@ def update_model_management_models_list():
 
 
 def update_model_selector_choices():
-    return gr.update(choices=model_manager.get_model_list())
+    return gr.update(choices=model_manager.get_model_list(), value=chat_load_model_block.update_select_model_dropdown_value())
 
 
 def add_model(model_name: Optional[str], original_repo: str, mlx_repo: str, quantize: str, default_language: str, default_system_prompt: Optional[str], multimodal_ability: List[str]):
@@ -372,6 +374,11 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                         model_management_add_model_block.multimodal_ability_dropdown
                     ]
                 ).then(
+                    fn=update_model_management_models_list,
+                    outputs=[
+                        model_list
+                    ]
+                ).then(
                     fn=update_model_selector_choices,
                     outputs=[
                         chat_load_model_block.model_selector_dropdown
@@ -380,11 +387,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     fn=update_model_selector_choices,
                     outputs=[
                         completion_load_model_block.model_selector_dropdown
-                    ]
-                ).then(
-                    fn=update_model_management_models_list,
-                    outputs=[
-                        model_list
                     ]
                 )
 
