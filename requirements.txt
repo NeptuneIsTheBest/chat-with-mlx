@@ -1,7 +1,9 @@
 gradio
 
-mlx
-mlx-lm
+mlx >= 0.21.0
+mlx-lm >= 0.20.0
+
+torchvision
 
 chromadb
 sentence-transformers
