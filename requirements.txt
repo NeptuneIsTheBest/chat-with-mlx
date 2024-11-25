@@ -7,4 +7,9 @@ torchvision
 
 chromadb
 sentence-transformers
+
 pypdf[full]
+python-docx
+python-pptx
+pandas
+openpyxl
