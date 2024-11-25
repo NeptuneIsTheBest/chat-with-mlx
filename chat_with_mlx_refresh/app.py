@@ -111,6 +111,8 @@ def handle_chat(message: Dict,
                 stream: bool = True):
     try:
         model = get_loaded_model()
+        if model.tokenizer.chat_template is None:
+            raise gr.Error("No chat template.")
         if system_prompt and system_prompt.strip() != "":
             history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
 
@@ -130,8 +132,8 @@ def handle_chat(message: Dict,
                 top_p=top_p,
                 max_tokens=max_tokens,
                 repetition_penalty=repetition_penalty):
-            if eos_token not in chunk:
-                response.content += chunk
+            if eos_token not in chunk.text:
+                response.content += chunk.text
                 yield response
     except Exception as e:
         raise gr.Error(str(e))
@@ -168,8 +170,8 @@ def handle_completion(prompt: str,
                     top_p=top_p,
                     max_tokens=max_tokens,
                     repetition_penalty=repetition_penalty):
-                if eos_token not in chunk:
-                    response += chunk
+                if eos_token not in chunk.text:
+                    response += chunk.text
                     yield response
     except Exception as e:
         raise gr.Error(str(e))
