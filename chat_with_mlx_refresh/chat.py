@@ -42,7 +42,6 @@ class LoadModelBlock(ComponentsBlock):
         self.model_selector_dropdown = gr.Dropdown(
             label=get_text("Page.Chat.LoadModelBlock.Dropdown.model_selector.label"),
             choices=self.model_manager.get_model_list(),
-            value=self.update_select_model_dropdown_value,
             render=False,
             interactive=True
         )

@@ -2,10 +2,12 @@ import enum
 import gc
 import json
 import logging
+import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Union, List, Optional
 
+import mlx.core.metal
 from huggingface_hub import snapshot_download
 from mlx_lm import load, generate, stream_generate
 
@@ -129,6 +131,7 @@ class Model:
         del self.model
         del self.tokenizer
         gc.collect()
+        mlx.core.metal.clear_cache()
 
 
 class ModelManager:
@@ -254,13 +257,14 @@ class ModelManager:
     def close_model(self):
         if self.model:
             self.model.close()
-            del self.model
-            gc.collect()
             self.model = None
             self.model_config = None
+            gc.collect()
+            mlx.core.metal.clear_cache()
 
     def get_loaded_model(self) -> Optional[Model]:
-        return self.model
+        model_ref = weakref.ref(self.model)
+        return model_ref()
 
     def get_loaded_model_config(self) -> Optional[Dict[str, str]]:
         return self.model_config
