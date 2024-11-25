@@ -77,7 +77,8 @@ def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]
     processed_message = ""
     if "files" in message:
         for file in message["files"]:
-            processed_message += file_manager.load_file(Path(file))
+            file_content = file_manager.load_file(Path(file))
+            processed_message += file_content if file_content else ""
     processed_message += message["text"]
     preprocessed_history = []
     i = 0
@@ -86,6 +87,7 @@ def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]
         if isinstance(current_history["content"], tuple):
             for file in current_history["content"]:
                 current_history["content"] = file_manager.load_file(Path(file))
+                current_history["content"] = current_history["content"] if current_history["content"] else ""
                 if i + 1 < len(history):
                     next_history = copy.deepcopy(history[i + 1])
                     current_history["content"] += next_history["content"]
@@ -112,6 +114,13 @@ def handle_chat(message: Dict,
         if system_prompt and system_prompt.strip() != "":
             history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
 
+        images = []
+        if model.is_vision_model():
+            if "files" in message:
+                for file in message["files"]:
+                    if Path(file).suffix.lower() in [".jpg", ".png", ".jpeg"]:
+                        images.append(file)
+
         message, history = preprocess_file(message, history)
 
         temperature = float(temperature)
@@ -119,16 +128,29 @@ def handle_chat(message: Dict,
         repetition_penalty = float(repetition_penalty)
 
         response = ChatMessage(role="assistant", content="")
-        eos_token = model.tokenizer.eos_token
-        for chunk in model.generate_response(
-                message=message,
-                history=history,
-                stream=stream,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                repetition_penalty=repetition_penalty):
-            if eos_token not in chunk:
+        if not model.is_vision_model():
+            eos_token = model.tokenizer.eos_token
+            for chunk in model.generate_response(
+                    message=message,
+                    history=history,
+                    stream=stream,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    repetition_penalty=repetition_penalty):
+                if eos_token not in chunk:
+                    response.content += chunk
+                    yield response
+        else:
+            for chunk in model.generate_response(
+                    message=message,
+                    history=history,
+                    stream=stream,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    repetition_penalty=repetition_penalty,
+                    images=images):
                 response.content += chunk
                 yield response
     except Exception as e:
@@ -185,7 +207,7 @@ def load_model(model_name: str) -> Tuple[str, str]:
         model_manager.load_model(model_name)
         return get_load_model_status(), model_manager.get_system_prompt(default=True)
     except Exception as e:
-        gr.Error(str(e))
+        raise gr.Error(str(e))
 
 
 def chat_load_model_callback(model_name: str):
@@ -214,6 +236,7 @@ def update_model_selector_choices():
 def add_model(model_name: Optional[str], original_repo: str, mlx_repo: str, quantize: str, default_language: str, default_system_prompt: Optional[str], multimodal_ability: List[str]):
     try:
         model_manager.add_config(original_repo, mlx_repo, model_name, quantize, default_language, default_system_prompt, multimodal_ability)
+        gr.Info(get_text("Page.ModelManagement.Info.model_added.message"))
     except Exception as e:
         raise gr.Error(str(e))
 

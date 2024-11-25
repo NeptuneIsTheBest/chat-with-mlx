@@ -133,6 +133,11 @@ MULTI_LANGUAGE = {
                             "value": "Add model"
                         }
                     }
+                },
+                "Info": {
+                    "model_added": {
+                        "message": "Model added."
+                    }
                 }
             }
         }

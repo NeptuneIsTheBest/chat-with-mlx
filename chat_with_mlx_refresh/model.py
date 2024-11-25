@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Union, List, Optional
 
+import mlx_vlm
 from huggingface_hub import snapshot_download
 from mlx_lm import load, generate, stream_generate
 
@@ -26,17 +27,28 @@ class Message:
 
 
 class Model:
-    def __init__(self, model_path: str, max_tokens: int = 4096, ):
+    def __init__(self, model_path: str, vision=False):
         self.model_path = model_path
-        self.max_tokens = max_tokens
+        self.vision = vision
 
-        self.model, self.tokenizer = self._load_model()
+        if vision:
+            self.model, self.tokenizer, self.config = self._load_model()
+        else:
+            self.model, self.tokenizer = self._load_model()
 
     def _load_model(self):
         try:
-            # Replace with actual model loading code
-            model, tokenizer = load(self.model_path)
-            return model, tokenizer
+            if self.vision:
+                processor_config = Path(self.model_path) / "processor_config.json"
+                with open(processor_config) as json_file:
+                    processor_config = json.load(json_file)
+                processor_config["trust_remote_code"] = True
+                model, tokenizer = mlx_vlm.load(self.model_path, processor_config=processor_config)
+                config = mlx_vlm.utils.load_config(self.model_path)
+                return model, tokenizer, config
+            else:
+                model, tokenizer = load(self.model_path)
+                return model, tokenizer
         except Exception as e:
             raise e
 
@@ -77,13 +89,20 @@ class Model:
             temperature: float = 0.7,
             top_p: float = 0.9,
             max_tokens: int = 512,
-            repetition_penalty: float = 1.0
+            repetition_penalty: float = 1.0,
+            images: List[str] = None
     ):
+        if self.vision and not images or len(images) == 0:
+            raise RuntimeError("For vision models there must be at least one image")
+        stream = stream if not self.vision else False
         message = [Message(MessageRole.USER, message).to_dict()]
 
         conversation = history + message
 
-        formatted_prompt = self.tokenizer.apply_chat_template(conversation=conversation, tokenize=False, add_generation_prompt=True)
+        if self.vision:
+            formatted_prompt = mlx_vlm.prompt_utils.apply_chat_template(processor=self.tokenizer, config=self.config, prompt=conversation, num_images=len(images))
+        else:
+            formatted_prompt = self.tokenizer.apply_chat_template(conversation=conversation, tokenize=False, add_generation_prompt=True)
 
         try:
             if stream:
@@ -100,21 +119,34 @@ class Model:
                     temperature=temperature,
                     top_p=top_p,
                     max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty
+                    repetition_penalty=repetition_penalty,
+                    images=images if len(images) > 0 else None
                 )
         except Exception as e:
             raise e
 
-    def _generate(self, prompt: str, temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
-        return generate(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            prompt=prompt,
-            temp=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            repetition_penalty=repetition_penalty
-        )
+    def _generate(self, prompt: str, temperature: float, top_p: float, max_tokens: int, repetition_penalty: float, images: List[str] = None):
+        if self.vision:
+            return mlx_vlm.generate(
+                model=self.model,
+                processor=self.tokenizer,
+                prompt=prompt,
+                temp=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                repetition_penalty=repetition_penalty,
+                image=images
+            )
+        else:
+            return generate(
+                model=self.model,
+                tokenizer=self.tokenizer,
+                prompt=prompt,
+                temp=temperature,
+                top_p=top_p,
+                max_tokens=max_tokens,
+                repetition_penalty=repetition_penalty
+            )
 
     def _stream_generate(self, prompt: str, temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
         return stream_generate(
@@ -126,6 +158,9 @@ class Model:
             max_tokens=max_tokens,
             repetition_penalty=repetition_penalty
         )
+
+    def is_vision_model(self):
+        return self.vision
 
     def close(self):
         del self.model
@@ -185,6 +220,8 @@ class ModelManager:
             system_prompt: Optional[str] = None,
             multimodal_ability: Optional[List[str]] = None,
     ):
+        if None in [original_repo, mlx_repo]:
+            raise RuntimeError("original_repo and mlx_repo cannot be None.")
         if len(original_repo.strip().split("/")) != 2 or len(mlx_repo.strip().split("/")) != 2:
             raise RuntimeError("'original_repo' or 'mlx_repo' not in compliance with the specification.")
         if quantize not in ["None", "4bit", "8bit", "bf16", "bf32"]:
@@ -194,9 +231,14 @@ class ModelManager:
         if system_prompt and system_prompt.strip() == "":
             system_prompt = None
         if multimodal_ability:
+            none_ability = False
             for ability in multimodal_ability:
                 if ability not in ["None", "vision"]:
                     raise RuntimeError("multimodal_ability must be one of 'None', 'vision'")
+                if ability == "None":
+                    none_ability = True
+                elif none_ability:
+                    raise RuntimeError("Cannot set 'None' with other capabilities")
         model_config = {
             "original_repo": original_repo.strip(),
             "mlx_repo": mlx_repo.strip(),
@@ -224,7 +266,10 @@ class ModelManager:
                     if not all([model_name, default_language, quantize]):
                         logging.info(f"Skipping incomplete config: {config_file}")
                         continue
+                    multimodal_ability = model_config.get("multimodal_ability")
                     display_name = f"{model_name}({default_language},{quantize})"
+                    if multimodal_ability and "vision" in multimodal_ability:
+                        display_name = f"{model_name}({default_language},{quantize},{"-".join(multimodal_ability)})"
                     model_config["display_name"] = display_name
                     model_configs[display_name] = model_config
                 except json.JSONDecodeError as e:
@@ -248,7 +293,11 @@ class ModelManager:
                 raise RuntimeError(f"Failed to download model from '{mlx_repo}': {e}")
 
         try:
-            self.model = Model(str(local_model_path))
+            multimodal_ability = model_config.get("multimodal_ability")
+            vision_capability = False
+            if "vision" in multimodal_ability:
+                vision_capability = True
+            self.model = Model(str(local_model_path), vision=vision_capability)
             self.model_config = model_config
         except Exception as e:
             raise RuntimeError(f"Failed to load model from '{local_model_path}': {e}")
