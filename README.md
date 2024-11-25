@@ -1,5 +1,8 @@
 # Chat with MLX
 
+> [!Warning]
+> The project is currently under active development, please update frequently using the following commands: `pip install -U git+https://github.com/NeptuneIsTheBest/chat-with-mlx.git`
+
 **Run LLM on your Mac!** An all-in-one chat Web UI based on the MLX framework, designed for Apple Silicon.
 
 **chat-with-mlx** is based on [qnguyen3/chat-with-mlx](https://github.com/qnguyen3/chat-with-mlx) and provides similar functionality.
@@ -8,7 +11,7 @@ In addition, we plan to add the ability to upload pictures for chatting to the m
 
 If this helps you, I'd be happy if you could give me a star, thank you. ✨
 
-## TLDR
+## TL;DR
 Use the following commands to install and run:
 ```bash
 python -m venv chat-with-mlx
