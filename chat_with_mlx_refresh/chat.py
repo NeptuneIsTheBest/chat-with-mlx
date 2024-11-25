@@ -80,7 +80,7 @@ class AdvancedSettingBlock(ComponentsBlock):
         self.temperature_slider = gr.Slider(
             minimum=0.0,
             maximum=2.0,
-            value=0.7,
+            value=0.5,
             label=get_text("Page.Chat.Accordion.AdvancedSetting.Slider.temperature.label"),
             render=False,
             interactive=True
@@ -88,7 +88,7 @@ class AdvancedSettingBlock(ComponentsBlock):
         self.top_p_slider = gr.Slider(
             minimum=0.0,
             maximum=1.0,
-            value=0.95,
+            value=0.5,
             label=get_text("Page.Chat.Accordion.AdvancedSetting.Slider.top_p.label"),
             render=False,
             interactive=True

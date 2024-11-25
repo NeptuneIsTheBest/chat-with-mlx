@@ -7,7 +7,6 @@ from typing import Dict, List, Tuple, Optional
 
 import gradio as gr
 import pandas as pd
-import pypdf
 from gradio.components.chatbot import ChatMessage
 
 from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
@@ -48,26 +47,97 @@ class FileManager:
     def __init__(self):
         self.files = {}
 
+    def format_content(self, file_name, content):
+        boundary_start = f"<<<BEGIN FILE:{file_name}>>>"
+        boundary_end = f"<<<END FILE:{file_name}>>>"
+        # Ensure the content does not contain the boundary markers
+        content = content.replace(boundary_start, '')
+        content = content.replace(boundary_end, '')
+        return f"{boundary_start}\n{content}\n{boundary_end}"
+
     def load_file(self, file_name: Path):
         if file_name.name in self.files:
             if self.files[file_name.name]["md5"] == get_file_md5(file_name):
                 return self.files[file_name.name]["content"]
-        if file_name.suffix.lower() == ".pdf":
+        suffix = file_name.suffix.lower()
+        if suffix == ".pdf":
             return self.load_pdf(file_name)
-        elif file_name.suffix.lower() in [".txt", ".csv", ".md"]:
+        elif suffix in [".txt", ".csv", ".md"]:
             return self.load_txt_like(file_name)
+        elif suffix == ".docx":
+            return self.load_docx(file_name)
+        elif suffix == ".pptx":
+            return self.load_pptx(file_name)
+        elif suffix in [".xlsx", ".xls"]:
+            return self.load_excel(file_name)
+        else:
+            raise ValueError("Unsupported file format")
 
     def load_pdf(self, file_name: Path):
+        import pypdf
         pdf = pypdf.PdfReader(file_name)
-        markdown_content = "{" + "file: {}, content: ".format(file_name)
+        content = ''
         for page in pdf.pages:
-            markdown_content += page.extract_text()
-        markdown_content += "}"
-        self.files[file_name.name] = {"md5": get_file_md5(file_name), "content": markdown_content}
-        return self.files[file_name.name]["content"]
+            text = page.extract_text()
+            if text:
+                content += text
+        formatted_content = self.format_content(file_name, content)
+        self.files[file_name.name] = {
+            "md5": get_file_md5(file_name),
+            "content": formatted_content
+        }
+        return formatted_content
 
     def load_txt_like(self, file_name: Path):
-        pass
+        with open(file_name, 'r', encoding='utf-8') as f:
+            content = f.read()
+        formatted_content = self.format_content(file_name, content)
+        self.files[file_name.name] = {
+            "md5": get_file_md5(file_name),
+            "content": formatted_content
+        }
+        return formatted_content
+
+    def load_docx(self, file_name: Path):
+        import docx
+        doc = docx.Document(str(file_name))
+        content = "\n".join([para.text for para in doc.paragraphs])
+        formatted_content = self.format_content(file_name, content)
+        self.files[file_name.name] = {
+            "md5": get_file_md5(file_name),
+            "content": formatted_content
+        }
+        return formatted_content
+
+    def load_pptx(self, file_name: Path):
+        from pptx import Presentation
+        prs = Presentation(str(file_name))
+        content = ""
+        for slide in prs.slides:
+            for shape in slide.shapes:
+                if hasattr(shape, "text"):
+                    content += shape.text + "\n"
+        formatted_content = self.format_content(file_name, content)
+        self.files[file_name.name] = {
+            "md5": get_file_md5(file_name),
+            "content": formatted_content
+        }
+        return formatted_content
+
+    def load_excel(self, file_name: Path):
+        import pandas as pd
+        excel_file = pd.ExcelFile(file_name)
+        content = ""
+        for sheet_name in excel_file.sheet_names:
+            df = pd.read_excel(excel_file, sheet_name=sheet_name)
+            content += f"Sheet: {sheet_name}\n"
+            content += df.to_csv(index=False)
+        formatted_content = self.format_content(file_name, content)
+        self.files[file_name.name] = {
+            "md5": get_file_md5(file_name),
+            "content": formatted_content
+        }
+        return formatted_content
 
 
 file_manager = FileManager()

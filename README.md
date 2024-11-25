@@ -12,7 +12,9 @@ In addition, we plan to add the ability to upload pictures for chatting to the m
 If this helps you, I'd be happy if you could give me a star, thank you. ✨
 
 ## TL;DR
+
 Use the following commands to install and run:
+
 ```bash
 python -m venv chat-with-mlx
 cd chat-with-mlx
@@ -24,13 +26,15 @@ chat-with-mlx
 ## Roadmap
 
 ### Key Features
+
 * [x] Chat
 * [x] Completion
 * [x] Model Management
 * [ ] RAG
 
 ### Others
-* [x] Upload file to chat（Now, the function of uploading PDF has been implemented）
+
+* [x] Upload file to chat（support `PDF, Word, Excel, PPT` and some plain text file like `.txt, .csv, .md`.）
 * [ ] Upload picture to chat
 * [ ] and so on...
 
@@ -63,15 +67,16 @@ chat-with-mlx
 ### Model Configuration
 
 **Ministral-8B-Instruct-2410-4bit.json**
+
 ```json
 {
-    "original_repo": "mistralai/Ministral-8B-Instruct-2410",
-    "mlx_repo": "mlx-community/Ministral-8B-Instruct-2410-4bit",
-    "model_name": "Ministral-8B-Instruct-2410-4bit",
-    "quantize": "4bit",
-    "default_language": "multi",
-    "system_prompt": "",
-    "multimodal_ability": []
+  "original_repo": "mistralai/Ministral-8B-Instruct-2410",
+  "mlx_repo": "mlx-community/Ministral-8B-Instruct-2410-4bit",
+  "model_name": "Ministral-8B-Instruct-2410-4bit",
+  "quantize": "4bit",
+  "default_language": "multi",
+  "system_prompt": "",
+  "multimodal_ability": []
 }
 ```
 
@@ -87,7 +92,8 @@ chat-with-mlx
 
 If you have any questions, feel free to submit an issue to discuss at any time, or if you want to contribute any code, please feel free to submit a PR.
 
-Thanks to the maintainers of [qnguyen3/chat-with-mlx](https://github.com/qnguyen3/chat-with-mlx), [mlx](https://github.com/ml-explore/mlx), as well as all members of the open source community, for creating such a useful library.
+Thanks to the maintainers of [qnguyen3/chat-with-mlx](https://github.com/qnguyen3/chat-with-mlx), [mlx](https://github.com/ml-explore/mlx), as well as all members of the open source community, for
+creating such a useful library.
 
 ## License
 
