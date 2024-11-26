@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Dict, Union, List, Optional
 
 import mlx.core.metal
+import mlx_vlm
 from huggingface_hub import snapshot_download
 from mlx_lm import load, generate, stream_generate
 
@@ -38,7 +39,7 @@ class Model:
             model, tokenizer = load(self.model_path)
             return model, tokenizer
         except Exception as e:
-            raise e
+            raise RuntimeError(f"Failed to load model {self.model_path}: {e}")
 
     def generate_completion(
             self,
@@ -134,6 +135,133 @@ class Model:
         mlx.core.metal.clear_cache()
 
 
+class VisionModel:
+    def __init__(self, model_path: str):
+        self.model_path = model_path
+
+        self.config, self.model, self.processor, self.image_processor = self._load_model()
+
+    def _load_model(self):
+        try:
+            config = mlx_vlm.utils.load_config(self.model_path)
+            model, processor = mlx_vlm.load(self.model_path, processor_config={"trust_remote_code": True})
+            image_processor = mlx_vlm.utils.load_image_processor(self.model_path)
+            return config, model, processor, image_processor
+        except Exception as e:
+            raise RuntimeError(f"Failed to load {self.model_path}: {e}")
+
+    def generate_completion(
+            self,
+            prompt: str,
+            images: List[str],
+            stream: bool = False,
+            temperature: float = 0.7,
+            top_p: float = 0.9,
+            max_tokens: int = 512,
+            repetition_penalty: float = 1.0
+    ):
+        if not images or len(images) == 0:
+            raise RuntimeError(f"Text only chat is not supported.")
+
+        try:
+            if stream:
+                return self._stream_generate(
+                    prompt=prompt,
+                    images=images,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    repetition_penalty=repetition_penalty
+                )
+            else:
+                return self._generate(
+                    prompt=prompt,
+                    images=images,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    repetition_penalty=repetition_penalty
+                )
+        except Exception as e:
+            raise e
+
+    def generate_response(
+            self,
+            message: str,
+            images: List[str],
+            history: Union[str, List[Dict]],
+            stream: bool = False,
+            temperature: float = 0.7,
+            top_p: float = 0.9,
+            max_tokens: int = 512,
+            repetition_penalty: float = 1.0
+    ):
+        if not images or len(images) == 0:
+            raise RuntimeError(f"Text only chat is not supported.")
+
+        message = [Message(MessageRole.USER, message).to_dict()]
+
+        conversation = history + message
+
+        formatted_prompt = mlx_vlm.prompt_utils.apply_chat_template(processor=self.processor, config=self.config, prompt=conversation, add_generation_prompt=True, num_images=len(images))
+
+        try:
+            if stream:
+                return self._stream_generate(
+                    prompt=formatted_prompt,
+                    images=images,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    repetition_penalty=repetition_penalty
+                )
+            else:
+                return self._generate(
+                    prompt=formatted_prompt,
+                    images=images,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    repetition_penalty=repetition_penalty
+                )
+        except Exception as e:
+            raise e
+
+    def _generate(self, prompt: str, images: list[str], temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
+        return mlx_vlm.utils.generate(
+            model=self.model,
+            processor=self.processor,
+            image_processor=self.image_processor,
+            prompt=prompt,
+            image=images,
+            temp=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            repetition_penalty=repetition_penalty
+        )
+
+    def _stream_generate(self, prompt: str, images: list[str], temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
+        return mlx_vlm.utils.stream_generate(
+            model=self.model,
+            processor=self.processor,
+            image_processor=self.image_processor,
+            prompt=prompt,
+            image=images,
+            temp=temperature,
+            top_p=top_p,
+            max_tokens=max_tokens,
+            repetition_penalty=repetition_penalty
+        )
+
+    def close(self):
+        del self.model
+        del self.processor
+        del self.image_processor
+        del self.config
+        gc.collect()
+        mlx.core.metal.clear_cache()
+
+
 class ModelManager:
     def __init__(self, base_dir: Optional[str] = None):
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent / "models"
@@ -195,6 +323,8 @@ class ModelManager:
         if system_prompt and system_prompt.strip() == "":
             system_prompt = None
         if multimodal_ability:
+            if "None" in multimodal_ability and len(multimodal_ability) > 1:
+                raise RuntimeError("'None' cannot exist with other abilities")
             for ability in multimodal_ability:
                 if ability not in ["None", "vision"]:
                     raise RuntimeError("multimodal_ability must be one of 'None', 'vision'")
@@ -208,7 +338,10 @@ class ModelManager:
             "multimodal_ability": [] if multimodal_ability == ["None"] else multimodal_ability
         }
         self.create_config_json(model_config)
-        display_name = f"{model_config['model_name']}({default_language},{quantize})"
+        if multimodal_ability and len(multimodal_ability) > 0 and "None" not in multimodal_ability:
+            display_name = f"{model_config['model_name']}({default_language},{quantize},{"".join(multimodal_ability)})"
+        else:
+            display_name = f"{model_config['model_name']}({default_language},{quantize})"
         model_config["display_name"] = display_name
         self.model_configs[display_name] = model_config
 
@@ -225,7 +358,11 @@ class ModelManager:
                     if not all([model_name, default_language, quantize]):
                         logging.info(f"Skipping incomplete config: {config_file}")
                         continue
-                    display_name = f"{model_name}({default_language},{quantize})"
+                    multimodal_ability = model_config.get("multimodal_ability")
+                    if multimodal_ability and len(multimodal_ability) > 0 and "None" not in multimodal_ability:
+                        display_name = f"{model_name}({default_language},{quantize},{"".join(multimodal_ability)})"
+                    else:
+                        display_name = f"{model_name}({default_language},{quantize})"
                     model_config["display_name"] = display_name
                     model_configs[display_name] = model_config
                 except json.JSONDecodeError as e:
@@ -249,7 +386,8 @@ class ModelManager:
                 raise RuntimeError(f"Failed to download model from '{mlx_repo}': {e}")
 
         try:
-            self.model = Model(str(local_model_path))
+            multimodal_ability = model_config.get("multimodal_ability")
+            self.model = VisionModel(str(local_model_path)) if multimodal_ability and "vision" in multimodal_ability else Model(str(local_model_path))
             self.model_config = model_config
         except Exception as e:
             raise RuntimeError(f"Failed to load model from '{local_model_path}': {e}")
@@ -263,8 +401,11 @@ class ModelManager:
             mlx.core.metal.clear_cache()
 
     def get_loaded_model(self) -> Optional[Model]:
-        model_ref = weakref.ref(self.model)
-        return model_ref()
+        if self.model:
+            model_ref = weakref.ref(self.model)
+            return model_ref()
+        else:
+            return None
 
     def get_loaded_model_config(self) -> Optional[Dict[str, str]]:
         return self.model_config

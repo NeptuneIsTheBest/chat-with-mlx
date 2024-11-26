@@ -7,7 +7,7 @@
 
 **chat-with-mlx** is based on [qnguyen3/chat-with-mlx](https://github.com/qnguyen3/chat-with-mlx) and provides similar functionality.
 
-In addition, we plan to add the ability to upload pictures for chatting to the multimodal model.
+You can upload files, or even images to chat when using the vision model.
 
 If this helps you, I'd be happy if you could give me a star, thank you. ✨
 
@@ -35,7 +35,7 @@ chat-with-mlx
 ### Others
 
 * [x] Upload file to chat（support `PDF, Word, Excel, PPT` and some plain text file like `.txt, .csv, .md`.）
-* [ ] Upload picture to chat
+* [x] Upload picture to chat (Currently tested on the `Phi-3.5-vision-instruct` model)
 * [ ] and so on...
 
 ## How to use
