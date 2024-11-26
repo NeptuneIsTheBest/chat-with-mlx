@@ -3,7 +3,7 @@ import atexit
 import copy
 import hashlib
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional
+from typing import Dict, List, Tuple, Optional, Union
 
 import gradio as gr
 import pandas as pd
@@ -11,7 +11,7 @@ from gradio.components.chatbot import ChatMessage
 
 from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
 from .language import get_text
-from .model import Message, MessageRole, ModelManager, Model
+from .model import Message, MessageRole, ModelManager, Model, VisionModel
 from .model_management import AddModelBlock
 
 model_manager = ModelManager()
@@ -28,7 +28,7 @@ completion_advanced_setting_block = AdvancedSettingBlock()
 model_management_add_model_block = AddModelBlock(model_manager=model_manager)
 
 
-def get_loaded_model() -> Model:
+def get_loaded_model() -> Union[Model, VisionModel]:
     model = model_manager.get_loaded_model()
     if model is None:
         raise RuntimeError("No model loaded.")
@@ -50,7 +50,6 @@ class FileManager:
     def format_content(self, file_name, content):
         boundary_start = f"<<<BEGIN FILE:{file_name}>>>"
         boundary_end = f"<<<END FILE:{file_name}>>>"
-        # Ensure the content does not contain the boundary markers
         content = content.replace(boundary_start, '')
         content = content.replace(boundary_end, '')
         return f"{boundary_start}\n{content}\n{boundary_end}"
@@ -71,7 +70,7 @@ class FileManager:
         elif suffix in [".xlsx", ".xls"]:
             return self.load_excel(file_name)
         else:
-            raise ValueError("Unsupported file format")
+            return None
 
     def load_pdf(self, file_name: Path):
         import pypdf
@@ -181,10 +180,27 @@ def handle_chat(message: Dict,
                 stream: bool = True):
     try:
         model = get_loaded_model()
-        if model.tokenizer.chat_template is None:
-            raise gr.Error("No chat template.")
+        if isinstance(model, VisionModel):
+            if model.processor.tokenizer.chat_template is None:
+                raise RuntimeError("No chat template.")
+        else:
+            if model.tokenizer.chat_template is None:
+                raise RuntimeError("No chat template.")
+
         if system_prompt and system_prompt.strip() != "":
             history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
+
+        images = []
+        if isinstance(model, VisionModel):
+            for h in history:
+                if "content" in h:
+                    for file in h["content"]:
+                        if Path(file).suffix.lower() in [".jpg", ".png", ".jpeg"]:
+                            images.append(file)
+            if "files" in message:
+                for file in message["files"]:
+                    if Path(file).suffix.lower() in [".jpg", ".png", ".jpeg"]:
+                        images.append(file)
 
         message, history = preprocess_file(message, history)
 
@@ -193,18 +209,33 @@ def handle_chat(message: Dict,
         repetition_penalty = float(repetition_penalty)
 
         response = ChatMessage(role="assistant", content="")
-        eos_token = model.tokenizer.eos_token
-        for chunk in model.generate_response(
-                message=message,
-                history=history,
-                stream=stream,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                repetition_penalty=repetition_penalty):
-            if eos_token not in chunk.text:
-                response.content += chunk.text
-                yield response
+        if isinstance(model, VisionModel):
+            eos_token = model.processor.tokenizer.eos_token
+            for chunk in model.generate_response(
+                    message=message,
+                    images=images,
+                    history=history,
+                    stream=stream,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    repetition_penalty=repetition_penalty):
+                if eos_token not in chunk:
+                    response.content += chunk
+                    yield response
+        else:
+            eos_token = model.tokenizer.eos_token
+            for chunk in model.generate_response(
+                    message=message,
+                    history=history,
+                    stream=stream,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=max_tokens,
+                    repetition_penalty=repetition_penalty):
+                if eos_token not in chunk.text:
+                    response.content += chunk.text
+                    yield response
     except Exception as e:
         raise gr.Error(str(e))
 
@@ -217,6 +248,8 @@ def handle_completion(prompt: str,
                       stream: bool = True):
     try:
         model = get_loaded_model()
+        if isinstance(model, VisionModel):
+            raise RuntimeError("Not supported yet.")
 
         temperature = float(temperature)
         top_p = float(top_p)
