@@ -5,9 +5,11 @@
 
 **Run LLM on your Mac!** An all-in-one chat Web UI based on the MLX framework, designed for Apple Silicon.
 
-**chat-with-mlx** is based on [qnguyen3/chat-with-mlx](https://github.com/qnguyen3/chat-with-mlx) and provides similar functionality.
+The idea of chat-with-mlx comes from [qnguyen3/chat-with-mlx](https://github.com/qnguyen3/chat-with-mlx).
 
-You can upload files, or even images to chat when using the vision model.
+chat-with-mlx provides a similar and more modern experience, and offers more features.
+
+You can **upload files**, or even **images** to chat when using the vision model.
 
 If this helps you, I'd be happy if you could give me a star, thank you. ✨
 
@@ -66,6 +68,12 @@ chat-with-mlx
 
 ### Model Configuration
 
+You no longer need to add models by manually editing configuration files, you only need to use the "Model Management" page to add your models.
+
+You can add various models from [mlx-community](https://huggingface.co/mlx-community). Models will be automatically downloaded from HuggingFace.
+
+For the following configuration files, the model files will be stored in `models/models/Ministral-8B-Instruct-2410-4bit`.
+
 **Ministral-8B-Instruct-2410-4bit.json**
 
 ```json
@@ -98,3 +106,7 @@ creating such a useful library.
 ## License
 
 This project is licensed under the MIT License.
+
+## Star History
+
+[![Star History Chart](https://api.star-history.com/svg?repos=NeptuneIsTheBest/chat-with-mlx&type=Date)](https://star-history.com/#NeptuneIsTheBest/chat-with-mlx&Date)

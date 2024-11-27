@@ -1,8 +1,8 @@
 gradio
 
 mlx >= 0.21.0
-mlx-lm >= 0.20.0
-mlx-vlm >= 0.1.1
+mlx-lm >= 0.20.1
+mlx-vlm >= 0.1.2
 
 torch
 torchvision
