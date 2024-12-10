@@ -15,3 +15,5 @@ python-docx
 python-pptx
 pandas
 openpyxl
+
+openai
