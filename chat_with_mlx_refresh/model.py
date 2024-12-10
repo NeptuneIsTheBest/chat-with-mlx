@@ -11,6 +11,7 @@ import mlx.core.metal
 import mlx_vlm
 from huggingface_hub import snapshot_download
 from mlx_lm import load, generate, stream_generate
+from openai import OpenAI
 
 
 class MessageRole(enum.Enum):
@@ -262,6 +263,26 @@ class VisionModel:
         mlx.core.metal.clear_cache()
 
 
+class OpenAIModel:
+    def __init__(self, api_key: str, model_name: str, base_url: str = None):
+        self.api_key = api_key
+        self.client = OpenAI(api_key=api_key, base_url=base_url)
+
+        self.model_name = model_name
+
+    def generate_response(self, messages: List, stream: bool = False, **kwargs):
+        return self.client.chat.completions.create(
+            model=self.model_name,
+            messages=messages,
+            stream=stream,
+            **kwargs
+        )
+
+    def close(self):
+        del self.client
+        del self.api_key
+
+
 class ModelManager:
     def __init__(self, base_dir: Optional[str] = None):
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent / "models"
@@ -280,12 +301,18 @@ class ModelManager:
         self.model_configs: Dict[str, Dict[str, str]] = self.scan_models()
 
     def get_config_path(self, model_config: Dict[str, str]) -> Path:
-        mlx_repo = model_config.get("mlx_repo")
-        if not mlx_repo:
-            model_name = model_config.get('model_name', 'unknown')
-            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
-        mlx_repo_name = mlx_repo.strip().split('/')[-1]
-        return self.configs_dir / f"{mlx_repo_name}.json"
+        if "type" in model_config and model_config.get("type") == "openai_api":
+            model_name = model_config.get('model_name')
+            if not model_name:
+                raise RuntimeError(f"'model_name' not specified for OpenAI API Model.")
+            return self.configs_dir / f"{model_name}.json"
+        else:
+            mlx_repo = model_config.get("mlx_repo")
+            if not mlx_repo:
+                model_name = model_config.get('model_name', 'unknown')
+                raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
+            mlx_repo_name = mlx_repo.strip().split('/')[-1]
+            return self.configs_dir / f"{mlx_repo_name}.json"
 
     def get_model_path(self, model_config: Dict[str, str]) -> Path:
         mlx_repo = model_config.get("mlx_repo")
@@ -317,17 +344,17 @@ class ModelManager:
         if len(original_repo.strip().split("/")) != 2 or len(mlx_repo.strip().split("/")) != 2:
             raise RuntimeError("'original_repo' or 'mlx_repo' not in compliance with the specification.")
         if quantize not in ["None", "4bit", "8bit", "bf16", "bf32"]:
-            raise RuntimeError("quantize must be one of 'None', '4bit', '8bit', 'bf16', 'bf32'")
+            raise RuntimeError("quantize must be one of 'None', '4bit', '8bit', 'bf16', 'bf32'.")
         if default_language not in ["multi"]:
-            raise RuntimeError("default_language must be one of 'multi'")
+            raise RuntimeError("default_language must be one of 'multi'.")
         if system_prompt and system_prompt.strip() == "":
             system_prompt = None
         if multimodal_ability:
             if "None" in multimodal_ability and len(multimodal_ability) > 1:
-                raise RuntimeError("'None' cannot exist with other abilities")
+                raise RuntimeError("'None' cannot exist with other abilities.")
             for ability in multimodal_ability:
                 if ability not in ["None", "vision"]:
-                    raise RuntimeError("multimodal_ability must be one of 'None', 'vision'")
+                    raise RuntimeError("multimodal_ability must be one of 'None', 'vision'.")
         model_config = {
             "original_repo": original_repo.strip(),
             "mlx_repo": mlx_repo.strip(),
@@ -345,6 +372,22 @@ class ModelManager:
         model_config["display_name"] = display_name
         self.model_configs[display_name] = model_config
 
+    def add_api_config(self, model_name: str, api_key: str, nick_name: Optional[str], base_url: Optional[str] = None, system_prompt: Optional[str] = None):
+        if not model_name or not api_key:
+            raise RuntimeError("model_name and api_key are required.")
+        model_config = {
+            "model_name": model_name,
+            "api_key": api_key,
+            "base_url": base_url,
+            "nick_name": nick_name,
+            "system_prompt": system_prompt,
+            "type": "openai_api"
+        }
+        self.create_config_json(model_config)
+        display_name = f"{nick_name if nick_name else model_name}({model_config['type']})"
+        model_config["display_name"] = display_name
+        self.model_configs[display_name] = model_config
+
     def scan_models(self) -> Dict[str, Dict[str, str]]:
         model_configs = {}
         for config_file in self.configs_dir.glob("*.json"):
@@ -353,18 +396,28 @@ class ModelManager:
                     with config_file.open("r", encoding="utf-8") as f:
                         model_config = json.load(f)
                     model_name = model_config.get("model_name")
-                    default_language = model_config.get("default_language")
-                    quantize = model_config.get("quantize") if model_config.get("quantize") else "None"
-                    if not all([model_name, default_language, quantize]):
-                        logging.info(f"Skipping incomplete config: {config_file}")
-                        continue
-                    multimodal_ability = model_config.get("multimodal_ability")
-                    if multimodal_ability and len(multimodal_ability) > 0 and "None" not in multimodal_ability:
-                        display_name = f"{model_name}({default_language},{quantize},{"".join(multimodal_ability)})"
+                    if "type" in model_config and model_config.get("type") == "openai_api":
+                        api_key = model_config.get("api_key")
+                        if not api_key or api_key.strip() == "":
+                            logging.info(f"Skipping incomplete config: {config_file}")
+                            continue
+                        nick_name = model_config.get("nick_name")
+                        display_name = f"{nick_name if nick_name else model_config['model_name']}({model_config['type']})"
+                        model_config["display_name"] = display_name
+                        model_configs[display_name] = model_config
                     else:
-                        display_name = f"{model_name}({default_language},{quantize})"
-                    model_config["display_name"] = display_name
-                    model_configs[display_name] = model_config
+                        default_language = model_config.get("default_language")
+                        quantize = model_config.get("quantize") if model_config.get("quantize") else "None"
+                        if not all([model_name, default_language, quantize]):
+                            logging.info(f"Skipping incomplete config: {config_file}")
+                            continue
+                        multimodal_ability = model_config.get("multimodal_ability")
+                        if multimodal_ability and len(multimodal_ability) > 0 and "None" not in multimodal_ability:
+                            display_name = f"{model_name}({default_language},{quantize},{"".join(multimodal_ability)})"
+                        else:
+                            display_name = f"{model_name}({default_language},{quantize})"
+                        model_config["display_name"] = display_name
+                        model_configs[display_name] = model_config
                 except json.JSONDecodeError as e:
                     logging.error(f"Error decoding JSON from {config_file}: {e}")
         return model_configs
@@ -377,20 +430,27 @@ class ModelManager:
         if not model_config:
             raise RuntimeError(f"Model '{model_name}' not found.")
 
-        local_model_path = self.get_model_path(model_config)
-        if not local_model_path.exists():
-            mlx_repo = model_config.get("mlx_repo")
+        if "type" in model_config and model_config.get("type") == "openai_api":
             try:
-                snapshot_download(repo_id=mlx_repo, local_dir=str(local_model_path))
+                self.model = OpenAIModel(model_config.get("api_key"), model_config.get("model_name"), model_config.get("base_url"))
+                self.model_config = model_config
             except Exception as e:
-                raise RuntimeError(f"Failed to download model from '{mlx_repo}': {e}")
+                raise RuntimeError(f"Error loading model '{model_name}'.")
+        else:
+            local_model_path = self.get_model_path(model_config)
+            if not local_model_path.exists():
+                mlx_repo = model_config.get("mlx_repo")
+                try:
+                    snapshot_download(repo_id=mlx_repo, local_dir=str(local_model_path))
+                except Exception as e:
+                    raise RuntimeError(f"Failed to download model from '{mlx_repo}': {e}")
 
-        try:
-            multimodal_ability = model_config.get("multimodal_ability")
-            self.model = VisionModel(str(local_model_path)) if multimodal_ability and "vision" in multimodal_ability else Model(str(local_model_path))
-            self.model_config = model_config
-        except Exception as e:
-            raise RuntimeError(f"Failed to load model from '{local_model_path}': {e}")
+            try:
+                multimodal_ability = model_config.get("multimodal_ability")
+                self.model = VisionModel(str(local_model_path)) if multimodal_ability and "vision" in multimodal_ability else Model(str(local_model_path))
+                self.model_config = model_config
+            except Exception as e:
+                raise RuntimeError(f"Failed to load model from '{local_model_path}': {e}")
 
     def close_model(self):
         if self.model:

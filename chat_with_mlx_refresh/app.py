@@ -1,5 +1,6 @@
 import argparse
 import atexit
+import base64
 import copy
 import hashlib
 from pathlib import Path
@@ -11,8 +12,8 @@ from gradio.components.chatbot import ChatMessage
 
 from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
 from .language import get_text
-from .model import Message, MessageRole, ModelManager, Model, VisionModel
-from .model_management import AddModelBlock
+from .model import Message, MessageRole, ModelManager, Model, VisionModel, OpenAIModel
+from .model_management import AddLocalModelBlock, AddAPIModelBlock
 
 model_manager = ModelManager()
 
@@ -25,7 +26,8 @@ completion_load_model_block = LoadModelBlock(model_manager=model_manager)
 
 completion_advanced_setting_block = AdvancedSettingBlock()
 
-model_management_add_model_block = AddModelBlock(model_manager=model_manager)
+model_management_add_loacl_model_block = AddLocalModelBlock(model_manager=model_manager)
+model_management_add_api_model_block = AddAPIModelBlock(model_manager=model_manager)
 
 
 def get_loaded_model() -> Union[Model, VisionModel]:
@@ -159,7 +161,7 @@ def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]
                 current_history["content"] = file_content if file_content else ""
                 if i + 1 < len(history):
                     next_history = copy.deepcopy(history[i + 1])
-                    current_history["content"] += next_history["content"] if next_history else ""
+                    current_history["content"] += next_history["content"] if "content" in next_history else ""
                     i += 1
                 preprocessed_history.append(current_history)
                 current_history = copy.deepcopy(history[i])
@@ -168,6 +170,21 @@ def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]
         preprocessed_history.append(current_history)
         i += 1
     return processed_message, preprocessed_history
+
+
+def encode_image(image_path: Path):
+    suffix = image_path.suffix.lower()
+    mime_types = {
+        ".png": "image/png",
+        ".jpg": "image/jpeg",
+        ".jpeg": "image/jpeg",
+        ".heif": "image/heif",
+        ".heic": "image/heic"
+    }
+    if suffix not in mime_types:
+        raise RuntimeError(f"Unsupported imgae type: {suffix}")
+    with open(image_path, 'rb') as f:
+        return f"data:{mime_types[suffix]};base64,{base64.b64encode(f.read()).decode('utf-8')}"
 
 
 def handle_chat(message: Dict,
@@ -180,62 +197,142 @@ def handle_chat(message: Dict,
                 stream: bool = True):
     try:
         model = get_loaded_model()
-        if isinstance(model, VisionModel):
-            if model.processor.tokenizer.chat_template is None:
-                raise RuntimeError("No chat template.")
-        else:
-            if model.tokenizer.chat_template is None:
-                raise RuntimeError("No chat template.")
-
-        if system_prompt and system_prompt.strip() != "":
-            history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
-
-        images = []
-        if isinstance(model, VisionModel):
-            for h in history:
-                if "content" in h:
+        if isinstance(model, OpenAIModel):
+            if system_prompt and system_prompt.strip() != "":
+                history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
+            messages = []
+            i = 0
+            while i < len(history):
+                h = history[i]
+                if isinstance(h["content"], tuple):
+                    msg = {
+                        "role": h["role"],
+                        "content": []
+                    }
+                    if i + 1 < len(history):
+                        i += 1
+                        next_history = history[i]
+                        if "content" in next_history:
+                            msg["content"].append({"type": "text", "text": next_history["content"]})
                     for file in h["content"]:
-                        if Path(file).suffix.lower() in [".jpg", ".png", ".jpeg"]:
-                            images.append(file)
-            if "files" in message:
+                        file = Path(file)
+                        suffix = file.suffix.lower()
+                        if file.is_file() and suffix in [".png", ".jpg", ".jpeg", ".heif", ".heic"]:
+                            image_base64 = encode_image(file)
+                            msg["content"].append({
+                                "type": "image_url",
+                                "image_url": {
+                                    "url": image_base64
+                                }
+                            })
+                        elif file.is_file():
+                            file_content = file_manager.load_file(file)
+                            msg["content"][0]["text"] += file_content if file_content else ""
+                    messages.append(msg)
+                else:
+                    messages.append(
+                        {
+                            "role": h["role"],
+                            "content": h["content"]
+                        }
+                    )
+                i += 1
+            if "files" in message and message["files"]:
+                msg = {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": message["text"]}
+                    ]
+                }
                 for file in message["files"]:
-                    if Path(file).suffix.lower() in [".jpg", ".png", ".jpeg"]:
-                        images.append(file)
-
-        message, history = preprocess_file(message, history)
-
-        temperature = float(temperature)
-        top_p = float(top_p)
-        repetition_penalty = float(repetition_penalty)
-
-        response = ChatMessage(role="assistant", content="")
-        if isinstance(model, VisionModel):
-            eos_token = model.processor.tokenizer.eos_token
-            for chunk in model.generate_response(
-                    message=message,
-                    images=images,
-                    history=history,
-                    stream=stream,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty):
-                if eos_token not in chunk:
-                    response.content += chunk
-                    yield response
+                    file = Path(file)
+                    suffix = file.suffix.lower()
+                    if file.is_file() and suffix in [".png", ".jpg", ".jpeg", ".heif", ".heic"]:
+                        image_base64 = encode_image(file)
+                        msg["content"].append({
+                            "type": "image_url",
+                            "image_url": {
+                                "url": image_base64
+                            }
+                        })
+                    elif file.is_file():
+                        file_content = file_manager.load_file(file)
+                        msg["content"][0]["text"] += file_content if file_content else ""
+                messages.append(msg)
+            else:
+                messages.append(Message(MessageRole.USER, content=message["text"]).to_dict())
+            result = ChatMessage(role="assistant", content="")
+            response = model.generate_response(messages=messages,
+                                               stream=stream,
+                                               temperature=temperature,
+                                               top_p=top_p,
+                                               max_tokens=max_tokens,
+                                               n=1)
+            if stream:
+                for chunk in response:
+                    content = chunk.choices[0].delta.content
+                    if content:
+                        result.content += content
+                        yield result
+            else:
+                ChatMessage(role="assistant", content=response.choices[0].message)
         else:
-            eos_token = model.tokenizer.eos_token
-            for chunk in model.generate_response(
-                    message=message,
-                    history=history,
-                    stream=stream,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty):
-                if eos_token not in chunk.text:
-                    response.content += chunk.text
-                    yield response
+            if isinstance(model, VisionModel):
+                if model.processor.tokenizer.chat_template is None:
+                    raise RuntimeError("No chat template.")
+            else:
+                if model.tokenizer.chat_template is None:
+                    raise RuntimeError("No chat template.")
+
+            if system_prompt and system_prompt.strip() != "":
+                history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
+
+            images = []
+            if isinstance(model, VisionModel):
+                for h in history:
+                    if "content" in h:
+                        for file in h["content"]:
+                            if Path(file).is_file() and Path(file).suffix.lower() in [".jpg", ".png", ".jpeg"]:
+                                images.append(file)
+                if "files" in message:
+                    for file in message["files"]:
+                        if Path(file).is_file() and Path(file).suffix.lower() in [".jpg", ".png", ".jpeg"]:
+                            images.append(file)
+
+            message, history = preprocess_file(message, history)
+
+            temperature = float(temperature)
+            top_p = float(top_p)
+            repetition_penalty = float(repetition_penalty)
+
+            response = ChatMessage(role="assistant", content="")
+            if isinstance(model, VisionModel):
+                eos_token = model.processor.tokenizer.eos_token
+                for chunk in model.generate_response(
+                        message=message,
+                        images=images,
+                        history=history,
+                        stream=stream,
+                        temperature=temperature,
+                        top_p=top_p,
+                        max_tokens=max_tokens,
+                        repetition_penalty=repetition_penalty):
+                    if eos_token not in chunk:
+                        response.content += chunk
+                        yield response
+            else:
+                eos_token = model.tokenizer.eos_token
+                for chunk in model.generate_response(
+                        message=message,
+                        history=history,
+                        stream=stream,
+                        temperature=temperature,
+                        top_p=top_p,
+                        max_tokens=max_tokens,
+                        repetition_penalty=repetition_penalty):
+                    if eos_token not in chunk.text:
+                        response.content += chunk.text
+                        yield response
     except Exception as e:
         raise gr.Error(str(e))
 
@@ -248,7 +345,7 @@ def handle_completion(prompt: str,
                       stream: bool = True):
     try:
         model = get_loaded_model()
-        if isinstance(model, VisionModel):
+        if isinstance(model, VisionModel) or isinstance(model, OpenAIModel):
             raise RuntimeError("Not supported yet.")
 
         temperature = float(temperature)
@@ -321,6 +418,13 @@ def update_model_selector_choices():
 def add_model(model_name: Optional[str], original_repo: str, mlx_repo: str, quantize: str, default_language: str, default_system_prompt: Optional[str], multimodal_ability: List[str]):
     try:
         model_manager.add_config(original_repo, mlx_repo, model_name, quantize, default_language, default_system_prompt, multimodal_ability)
+    except Exception as e:
+        raise gr.Error(str(e))
+
+
+def add_api_model(model_name: str, api_key: str, nick_name: Optional[str] = None, base_url: Optional[str] = None, system_prompt: Optional[str] = None):
+    try:
+        model_manager.add_api_config(model_name, api_key, nick_name=nick_name, base_url=base_url, system_prompt=system_prompt)
     except Exception as e:
         raise gr.Error(str(e))
 
@@ -466,34 +570,63 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 model_list.render()
 
             with gr.Column(scale=5):
-                model_management_add_model_block.render_all()
-                model_management_add_model_block.add_button.click(
-                    fn=add_model,
-                    inputs=[
-                        model_management_add_model_block.model_name_textbox,
-                        model_management_add_model_block.original_repo_textbox,
-                        model_management_add_model_block.mlx_repo_textbox,
-                        model_management_add_model_block.quantize_dropdown,
-                        model_management_add_model_block.default_language_dropdown,
-                        model_management_add_model_block.default_system_prompt_textbox,
-                        model_management_add_model_block.multimodal_ability_dropdown
-                    ]
-                ).then(
-                    fn=update_model_management_models_list,
-                    outputs=[
-                        model_list
-                    ]
-                ).then(
-                    fn=update_model_selector_choices,
-                    outputs=[
-                        chat_load_model_block.model_selector_dropdown
-                    ]
-                ).then(
-                    fn=update_model_selector_choices,
-                    outputs=[
-                        completion_load_model_block.model_selector_dropdown
-                    ]
-                )
+                with gr.Tab(get_text("Page.ModelManagement.Tab.local_model")):
+                    model_management_add_loacl_model_block.render_all()
+                    model_management_add_loacl_model_block.add_button.click(
+                        fn=add_model,
+                        inputs=[
+                            model_management_add_loacl_model_block.model_name_textbox,
+                            model_management_add_loacl_model_block.original_repo_textbox,
+                            model_management_add_loacl_model_block.mlx_repo_textbox,
+                            model_management_add_loacl_model_block.quantize_dropdown,
+                            model_management_add_loacl_model_block.default_language_dropdown,
+                            model_management_add_loacl_model_block.default_system_prompt_textbox,
+                            model_management_add_loacl_model_block.multimodal_ability_dropdown
+                        ]
+                    ).then(
+                        fn=update_model_management_models_list,
+                        outputs=[
+                            model_list
+                        ]
+                    ).then(
+                        fn=update_model_selector_choices,
+                        outputs=[
+                            chat_load_model_block.model_selector_dropdown
+                        ]
+                    ).then(
+                        fn=update_model_selector_choices,
+                        outputs=[
+                            completion_load_model_block.model_selector_dropdown
+                        ]
+                    )
+
+                with gr.Tab(get_text("Page.ModelManagement.Tab.openai_api")):
+                    model_management_add_api_model_block.render_all()
+                    model_management_add_api_model_block.add_button.click(
+                        fn=add_api_model,
+                        inputs=[
+                            model_management_add_api_model_block.model_name_textbox,
+                            model_management_add_api_model_block.api_key_textbox,
+                            model_management_add_api_model_block.nick_name_textbox,
+                            model_management_add_api_model_block.base_url_textbox,
+                            model_management_add_api_model_block.default_system_prompt_textbox
+                        ]
+                    ).then(
+                        fn=update_model_management_models_list,
+                        outputs=[
+                            model_list
+                        ]
+                    ).then(
+                        fn=update_model_selector_choices,
+                        outputs=[
+                            chat_load_model_block.model_selector_dropdown
+                        ]
+                    ).then(
+                        fn=update_model_selector_choices,
+                        outputs=[
+                            completion_load_model_block.model_selector_dropdown
+                        ]
+                    )
 
     app.load(
         fn=update_model_management_models_list,

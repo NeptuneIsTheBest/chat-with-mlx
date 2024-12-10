@@ -94,12 +94,16 @@ MULTI_LANGUAGE = {
                 }
             },
             "ModelManagement": {
+                "Tab": {
+                    "local_model": "Local Model",
+                    "openai_api": "OpenAI API"
+                },
                 "Dataframe": {
                     "model_list": {
                         "headers": "Models"
                     }
                 },
-                "AddModelBlock": {
+                "AddLocalModelBlock": {
                     "Textbox": {
                         "model_name": {
                             "label": "Model name",
@@ -131,6 +135,25 @@ MULTI_LANGUAGE = {
                     "Button": {
                         "add": {
                             "value": "Add model"
+                        }
+                    }
+                },
+                "AddAPIModelBlock": {
+                    "Textbox": {
+                        "model_name": {
+                            "label": "Model name",
+                            "placeholder": "The model to use when calling the API."
+                        },
+                        "nick_name": {
+                            "label": "Nick name"
+                        },
+                        "api_key": {
+                            "label": "API Key",
+                            "placeholder": "API Secret key."
+                        },
+                        "base_url": {
+                            "label": "Base url",
+                            "placeholder": "Base URL."
                         }
                     }
                 }
