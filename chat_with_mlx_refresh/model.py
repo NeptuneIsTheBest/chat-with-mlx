@@ -40,7 +40,7 @@ class Model:
             model, tokenizer = load(self.model_path)
             return model, tokenizer
         except Exception as e:
-            raise RuntimeError(f"Failed to load model {self.model_path}: {e}")
+            raise RuntimeError("Failed to load model {}: {}".format(self.model_path, e))
 
     def generate_completion(
             self,
@@ -149,7 +149,7 @@ class VisionModel:
             image_processor = mlx_vlm.utils.load_image_processor(self.model_path)
             return config, model, processor, image_processor
         except Exception as e:
-            raise RuntimeError(f"Failed to load {self.model_path}: {e}")
+            raise RuntimeError("Failed to load {}: {}".format(self.model_path, e))
 
     def generate_completion(
             self,
@@ -162,7 +162,7 @@ class VisionModel:
             repetition_penalty: float = 1.0
     ):
         if not images or len(images) == 0:
-            raise RuntimeError(f"Text only chat is not supported.")
+            raise RuntimeError("Text only chat is not supported.")
 
         try:
             if stream:
@@ -198,7 +198,7 @@ class VisionModel:
             repetition_penalty: float = 1.0
     ):
         if not images or len(images) == 0:
-            raise RuntimeError(f"Text only chat is not supported.")
+            raise RuntimeError("Text only chat is not supported.")
 
         message = [Message(MessageRole.USER, message).to_dict()]
 
@@ -304,13 +304,13 @@ class ModelManager:
         if "type" in model_config and model_config.get("type") == "openai_api":
             model_name = model_config.get('model_name')
             if not model_name:
-                raise RuntimeError(f"'model_name' not specified for OpenAI API Model.")
-            return self.configs_dir / f"{model_name}.json"
+                raise RuntimeError("'model_name' not specified for OpenAI API Model.")
+            return self.configs_dir / "{}.json".format(model_name)
         else:
             mlx_repo = model_config.get("mlx_repo")
             if not mlx_repo:
                 model_name = model_config.get('model_name', 'unknown')
-                raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
+                raise RuntimeError("'mlx_repo' not specified for model '{}'.".format(model_name))
             mlx_repo_name = mlx_repo.strip().split('/')[-1]
             return self.configs_dir / f"{mlx_repo_name}.json"
 
@@ -318,7 +318,7 @@ class ModelManager:
         mlx_repo = model_config.get("mlx_repo")
         if not mlx_repo:
             model_name = model_config.get('model_name', 'unknown')
-            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
+            raise RuntimeError("'mlx_repo' not specified for model '{}'.".format(model_name))
         mlx_repo_name = mlx_repo.strip().split('/')[-1]
         return self.models_dir / mlx_repo_name
 
@@ -366,9 +366,9 @@ class ModelManager:
         }
         self.create_config_json(model_config)
         if multimodal_ability and len(multimodal_ability) > 0 and "None" not in multimodal_ability:
-            display_name = f"{model_config['model_name']}({default_language},{quantize},{"".join(multimodal_ability)})"
+            display_name = "{}({},{},{})".format(model_config['model_name'], default_language, quantize, "".join(multimodal_ability))
         else:
-            display_name = f"{model_config['model_name']}({default_language},{quantize})"
+            display_name = "{}({},{})".format(model_config['model_name'], default_language, quantize)
         model_config["display_name"] = display_name
         self.model_configs[display_name] = model_config
 
@@ -384,7 +384,7 @@ class ModelManager:
             "type": "openai_api"
         }
         self.create_config_json(model_config)
-        display_name = f"{nick_name if nick_name else model_name}({model_config['type']})"
+        display_name = "{}({})".format(nick_name if nick_name else model_name, model_config['type'])
         model_config["display_name"] = display_name
         self.model_configs[display_name] = model_config
 
@@ -399,27 +399,27 @@ class ModelManager:
                     if "type" in model_config and model_config.get("type") == "openai_api":
                         api_key = model_config.get("api_key")
                         if not api_key or api_key.strip() == "":
-                            logging.info(f"Skipping incomplete config: {config_file}")
+                            logging.info("Skipping incomplete config: {}".format(config_file))
                             continue
                         nick_name = model_config.get("nick_name")
-                        display_name = f"{nick_name if nick_name else model_config['model_name']}({model_config['type']})"
+                        display_name = "{}({})".format(nick_name if nick_name else model_config['model_name'], model_config['type'])
                         model_config["display_name"] = display_name
                         model_configs[display_name] = model_config
                     else:
                         default_language = model_config.get("default_language")
                         quantize = model_config.get("quantize") if model_config.get("quantize") else "None"
                         if not all([model_name, default_language, quantize]):
-                            logging.info(f"Skipping incomplete config: {config_file}")
+                            logging.info("Skipping incomplete config: {}".format(config_file))
                             continue
                         multimodal_ability = model_config.get("multimodal_ability")
                         if multimodal_ability and len(multimodal_ability) > 0 and "None" not in multimodal_ability:
-                            display_name = f"{model_name}({default_language},{quantize},{"".join(multimodal_ability)})"
+                            display_name = "{}({},{},{})".format(model_name, default_language, quantize, "".join(multimodal_ability))
                         else:
-                            display_name = f"{model_name}({default_language},{quantize})"
+                            display_name = "{}({},{})".format(model_name, default_language, quantize)
                         model_config["display_name"] = display_name
                         model_configs[display_name] = model_config
                 except json.JSONDecodeError as e:
-                    logging.error(f"Error decoding JSON from {config_file}: {e}")
+                    logging.error("Error decoding JSON from {}: {}".format(config_file, e))
         return model_configs
 
     def load_model(self, model_name: str):
@@ -428,14 +428,14 @@ class ModelManager:
 
         model_config = self.model_configs.get(model_name)
         if not model_config:
-            raise RuntimeError(f"Model '{model_name}' not found.")
+            raise RuntimeError("Model '{}' not found.".format(model_name))
 
         if "type" in model_config and model_config.get("type") == "openai_api":
             try:
                 self.model = OpenAIModel(model_config.get("api_key"), model_config.get("model_name"), model_config.get("base_url"))
                 self.model_config = model_config
             except Exception as e:
-                raise RuntimeError(f"Error loading model '{model_name}'.")
+                raise RuntimeError("Error loading model '{}'.".format(model_name))
         else:
             local_model_path = self.get_model_path(model_config)
             if not local_model_path.exists():
@@ -443,14 +443,14 @@ class ModelManager:
                 try:
                     snapshot_download(repo_id=mlx_repo, local_dir=str(local_model_path))
                 except Exception as e:
-                    raise RuntimeError(f"Failed to download model from '{mlx_repo}': {e}")
+                    raise RuntimeError("Failed to download model from '{}': {}".format(mlx_repo, e))
 
             try:
                 multimodal_ability = model_config.get("multimodal_ability")
                 self.model = VisionModel(str(local_model_path)) if multimodal_ability and "vision" in multimodal_ability else Model(str(local_model_path))
                 self.model_config = model_config
             except Exception as e:
-                raise RuntimeError(f"Failed to load model from '{local_model_path}': {e}")
+                raise RuntimeError("Failed to load model from '{}': {}".format(local_model_path, e))
 
     def close_model(self):
         if self.model:
