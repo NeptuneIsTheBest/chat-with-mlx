@@ -7,10 +7,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, Union, List, Optional
 
-import mlx.core.metal
+import mlx
 import mlx_vlm
 from huggingface_hub import snapshot_download
-from mlx_lm import load, generate, stream_generate
+from mlx_lm import load, generate, stream_generate, sample_utils
 from openai import OpenAI
 
 
@@ -108,32 +108,38 @@ class Model:
             raise e
 
     def _generate(self, prompt: str, temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
+        sampler = sample_utils.make_sampler(temp=temperature, top_p=top_p)
+        logits_processors = sample_utils.make_logits_processors(
+            repetition_penalty=repetition_penalty
+        )
         return generate(
             model=self.model,
             tokenizer=self.tokenizer,
             prompt=prompt,
-            temp=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            repetition_penalty=repetition_penalty
+            sampler=sampler,
+            logits_processors=logits_processors,
+            max_tokens=max_tokens
         )
 
     def _stream_generate(self, prompt: str, temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
+        sampler = sample_utils.make_sampler(temp=temperature, top_p=top_p)
+        logits_processors = sample_utils.make_logits_processors(
+            repetition_penalty=repetition_penalty
+        )
         return stream_generate(
             model=self.model,
             tokenizer=self.tokenizer,
             prompt=prompt,
-            temp=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            repetition_penalty=repetition_penalty
+            sampler=sampler,
+            logits_processors=logits_processors,
+            max_tokens=max_tokens
         )
 
     def close(self):
         del self.model
         del self.tokenizer
         gc.collect()
-        mlx.core.metal.clear_cache()
+        mlx.core.clear_cache()
 
 
 class VisionModel:
@@ -260,7 +266,7 @@ class VisionModel:
         del self.image_processor
         del self.config
         gc.collect()
-        mlx.core.metal.clear_cache()
+        mlx.core.clear_cache()
 
 
 class OpenAIModel:
@@ -270,10 +276,11 @@ class OpenAIModel:
 
         self.model_name = model_name
 
-    def generate_response(self, messages: List, stream: bool = False, **kwargs):
+    def generate_response(self, messages: List, reasoning_effort: str = None, stream: bool = False, **kwargs):
         return self.client.chat.completions.create(
             model=self.model_name,
             messages=messages,
+            reasoning_effort=reasoning_effort,
             stream=stream,
             **kwargs
         )
@@ -458,7 +465,7 @@ class ModelManager:
             self.model = None
             self.model_config = None
             gc.collect()
-            mlx.core.metal.clear_cache()
+            mlx.core.clear_cache()
 
     def get_loaded_model(self) -> Optional[Model]:
         if self.model:
