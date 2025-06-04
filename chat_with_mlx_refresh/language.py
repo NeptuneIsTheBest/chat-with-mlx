@@ -169,5 +169,5 @@ def get_text(path: str) -> str:
     for key in keys:
         value = value.get(key)
         if value is None:
-            return ""
+            return path
     return value

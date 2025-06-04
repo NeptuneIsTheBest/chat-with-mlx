@@ -88,7 +88,7 @@ class AdvancedSettingBlock(ComponentsBlock):
         self.top_p_slider = gr.Slider(
             minimum=0.0,
             maximum=1.0,
-            value=0.5,
+            value=0.95,
             label=get_text("Page.Chat.Accordion.AdvancedSetting.Slider.top_p.label"),
             render=False,
             interactive=True

@@ -3,17 +3,20 @@ import atexit
 import base64
 import copy
 import hashlib
+import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 
 import gradio as gr
-import pandas as pd
 from gradio.components.chatbot import ChatMessage
 
 from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
 from .language import get_text
 from .model import Message, MessageRole, ModelManager, Model, VisionModel, OpenAIModel
 from .model_management import AddLocalModelBlock, AddAPIModelBlock
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 model_manager = ModelManager()
 
@@ -43,6 +46,31 @@ def get_file_md5(file_name: Path) -> str:
         for chunk in iter(lambda: f.read(4096), b""):
             md5.update(chunk)
     return md5.hexdigest()
+
+
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
+    logger.warning("pypdf not found.")
+
+try:
+    import docx
+except ImportError:
+    docx = None
+    logger.warning("docx not found.")
+
+try:
+    from pptx import Presentation
+except ImportError:
+    Presentation = None
+    logger.warning("pptx not found.")
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+    logger.warning("pandas not found.")
 
 
 class FileManager:
@@ -75,7 +103,9 @@ class FileManager:
             return None
 
     def load_pdf(self, file_name: Path):
-        import pypdf
+        if not pypdf:
+            logger.warning("pypdf not found.")
+            return None
         pdf = pypdf.PdfReader(file_name)
         content = ''
         for page in pdf.pages:
@@ -100,7 +130,9 @@ class FileManager:
         return formatted_content
 
     def load_docx(self, file_name: Path):
-        import docx
+        if not docx:
+            logger.warning("docx not found.")
+            return None
         doc = docx.Document(str(file_name))
         content = "\n".join([para.text for para in doc.paragraphs])
         formatted_content = self.format_content(file_name, content)
@@ -111,7 +143,9 @@ class FileManager:
         return formatted_content
 
     def load_pptx(self, file_name: Path):
-        from pptx import Presentation
+        if not Presentation:
+            logger.warning("pptx not found.")
+            return None
         prs = Presentation(str(file_name))
         content = ""
         for slide in prs.slides:
@@ -126,7 +160,9 @@ class FileManager:
         return formatted_content
 
     def load_excel(self, file_name: Path):
-        import pandas as pd
+        if not pd:
+            logger.warning("pandas not found.")
+            return None
         excel_file = pd.ExcelFile(file_name)
         content = ""
         for sheet_name in excel_file.sheet_names:
@@ -429,6 +465,44 @@ def add_api_model(model_name: str, api_key: str, nick_name: Optional[str] = None
         raise gr.Error(str(e))
 
 
+def update_slider_config(slider_new_min: Union[int, float], slider_new_max: Union[int, float], slider_value: Union[int, float]):
+    if not slider_new_min or not slider_new_max:
+        return gr.update()
+
+    if slider_new_min > slider_new_max:
+        return gr.update()
+
+    value_to_set = slider_value if slider_value is not None else (slider_new_min + slider_new_max) / 2
+
+    if isinstance(slider_new_min, int) and isinstance(slider_new_max, int):
+        value_to_set = int(value_to_set)
+
+    if value_to_set < slider_new_min:
+        value_to_set = slider_new_min
+
+    if value_to_set > slider_new_max:
+        value_to_set = slider_new_max
+
+    return gr.update(minimum=slider_new_min, maximum=slider_new_max, value=value_to_set)
+
+
+def update_model_max_length(slider_value: Union[int, float]):
+    model = model_manager.get_loaded_model()
+    if model is not None:
+        if isinstance(model, OpenAIModel):
+            return update_slider_config(1, 1048576, slider_value)
+        try:
+            model_max_length = model.tokenizer.model_max_length
+            if model_max_length is None or model_max_length <= 0:
+                model_max_length = 32768
+        except Exception as e:
+            model_max_length = 32768
+            logger.error("Error while updating model max length.")
+        return update_slider_config(1, model_max_length, slider_value)
+    else:
+        return gr.update()
+
+
 with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     gr.HTML("<h1>Chat with MLX</h1>")
 
@@ -455,6 +529,14 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                         fn=lambda x: x,
                         inputs=[chat_load_model_block.model_status_textbox],
                         outputs=[completion_load_model_block.model_status_textbox]
+                    ).then(
+                        fn=update_model_max_length,
+                        inputs=[chat_advanced_setting_block.max_tokens_slider],
+                        outputs=[chat_advanced_setting_block.max_tokens_slider]
+                    ).then(
+                        fn=update_model_max_length,
+                        inputs=[completion_advanced_setting_block.max_tokens_slider],
+                        outputs=[completion_advanced_setting_block.max_tokens_slider]
                     )
 
                 with gr.Accordion(label=get_text("Page.Chat.Accordion.AdvancedSetting.label"), open=False):
@@ -529,6 +611,14 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     fn=lambda x: x,
                     inputs=[completion_load_model_block.model_status_textbox],
                     outputs=[chat_load_model_block.model_status_textbox]
+                ).then(
+                    fn=update_model_max_length,
+                    inputs=[chat_advanced_setting_block.max_tokens_slider],
+                    outputs=[chat_advanced_setting_block.max_tokens_slider]
+                ).then(
+                    fn=update_model_max_length,
+                    inputs=[completion_advanced_setting_block.max_tokens_slider],
+                    outputs=[completion_advanced_setting_block.max_tokens_slider]
                 )
 
                 with gr.Row(visible=False):
@@ -643,6 +733,14 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         outputs=[
             completion_load_model_block.model_selector_dropdown
         ]
+    ).then(
+        fn=update_model_max_length,
+        inputs=[chat_advanced_setting_block.max_tokens_slider],
+        outputs=[chat_advanced_setting_block.max_tokens_slider]
+    ).then(
+        fn=update_model_max_length,
+        inputs=[completion_advanced_setting_block.max_tokens_slider],
+        outputs=[completion_advanced_setting_block.max_tokens_slider]
     )
 
 
@@ -655,8 +753,8 @@ atexit.register(exit_handler)
 
 
 def start(port: int, share: bool = False, in_browser: bool = True) -> None:
-    print(f"Starting the app on port {port} with share={share} and in_browser={in_browser}")
-    app.launch(server_port=port, inbrowser=in_browser, share=share)
+    logger.info(f"Starting the app on port {port} with share={share} and in_browser={in_browser}")
+    app.launch(server_port=port, inbrowser=in_browser, share=share, pwa=True)
 
 
 def main():
