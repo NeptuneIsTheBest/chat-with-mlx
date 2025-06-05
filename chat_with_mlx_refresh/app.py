@@ -3,17 +3,20 @@ import atexit
 import base64
 import copy
 import hashlib
+import logging
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 
 import gradio as gr
-import pandas as pd
 from gradio.components.chatbot import ChatMessage
 
 from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
 from .language import get_text
 from .model import Message, MessageRole, ModelManager, Model, VisionModel, OpenAIModel
 from .model_management import AddLocalModelBlock, AddAPIModelBlock
+
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 model_manager = ModelManager()
 
@@ -43,6 +46,31 @@ def get_file_md5(file_name: Path) -> str:
         for chunk in iter(lambda: f.read(4096), b""):
             md5.update(chunk)
     return md5.hexdigest()
+
+
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
+    logger.warning("pypdf not found.")
+
+try:
+    import docx
+except ImportError:
+    docx = None
+    logger.warning("docx not found.")
+
+try:
+    from pptx import Presentation
+except ImportError:
+    Presentation = None
+    logger.warning("pptx not found.")
+
+try:
+    import pandas as pd
+except ImportError:
+    pd = None
+    logger.warning("pandas not found.")
 
 
 class FileManager:
@@ -75,7 +103,9 @@ class FileManager:
             return None
 
     def load_pdf(self, file_name: Path):
-        import pypdf
+        if not pypdf:
+            logger.warning("pypdf not found.")
+            return None
         pdf = pypdf.PdfReader(file_name)
         content = ''
         for page in pdf.pages:
@@ -100,7 +130,9 @@ class FileManager:
         return formatted_content
 
     def load_docx(self, file_name: Path):
-        import docx
+        if not docx:
+            logger.warning("docx not found.")
+            return None
         doc = docx.Document(str(file_name))
         content = "\n".join([para.text for para in doc.paragraphs])
         formatted_content = self.format_content(file_name, content)
@@ -111,7 +143,9 @@ class FileManager:
         return formatted_content
 
     def load_pptx(self, file_name: Path):
-        from pptx import Presentation
+        if not Presentation:
+            logger.warning("pptx not found.")
+            return None
         prs = Presentation(str(file_name))
         content = ""
         for slide in prs.slides:
@@ -126,7 +160,9 @@ class FileManager:
         return formatted_content
 
     def load_excel(self, file_name: Path):
-        import pandas as pd
+        if not pd:
+            logger.warning("pandas not found.")
+            return None
         excel_file = pd.ExcelFile(file_name)
         content = ""
         for sheet_name in excel_file.sheet_names:
@@ -145,30 +181,61 @@ file_manager = FileManager()
 
 
 def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]]:
-    processed_message = ""
-    if "files" in message:
-        for file in message["files"]:
-            file_content = file_manager.load_file(Path(file))
-            processed_message += file_content if file_content else ""
-    processed_message += message["text"]
+    processed_message_parts = []
+    if "files" in message and message["files"]:
+        for file_path_str in message["files"]:
+            if file_path_str:
+                file_content = file_manager.load_file(Path(file_path_str))
+                if file_content:
+                    processed_message_parts.append(file_content)
+
+    text_content = message.get("text", "")
+    if not isinstance(text_content, str):
+        text_content = str(text_content) if text_content is not None else ""
+    processed_message_parts.append(text_content)
+
+    processed_message = "".join(processed_message_parts)
+
     preprocessed_history = []
     i = 0
     while i < len(history):
-        current_history = copy.deepcopy(history[i])
-        if isinstance(current_history["content"], tuple):
-            for file in current_history["content"]:
-                file_content = file_manager.load_file(Path(file))
-                current_history["content"] = file_content if file_content else ""
-                if i + 1 < len(history):
-                    next_history = copy.deepcopy(history[i + 1])
-                    current_history["content"] += next_history["content"] if "content" in next_history else ""
-                    i += 1
-                preprocessed_history.append(current_history)
-                current_history = copy.deepcopy(history[i])
+        current_hist_item_original = history[i]
+        current_processed_item = copy.deepcopy(current_hist_item_original)
+
+        current_content = current_hist_item_original.get("content")
+
+        if isinstance(current_content, tuple):
+            combined_files_text_parts = []
+            for file_path_in_tuple_str in current_content:
+                if file_path_in_tuple_str:
+                    file_actual_content = file_manager.load_file(Path(file_path_in_tuple_str))
+                    if file_actual_content:
+                        combined_files_text_parts.append(file_actual_content)
+
+            final_combined_content = "".join(combined_files_text_parts)
+
+            text_to_merge_from_next = ""
+            consumed_next_item_flag = False
+            if i + 1 < len(history):
+                next_original_hist_item = history[i + 1]
+                next_content = next_original_hist_item.get("content")
+                if isinstance(next_content, str):
+                    text_to_merge_from_next = next_content
+                    consumed_next_item_flag = True
+
+            current_processed_item["content"] = final_combined_content + text_to_merge_from_next
+            preprocessed_history.append(current_processed_item)
+
             i += 1
-            continue
-        preprocessed_history.append(current_history)
-        i += 1
+            if consumed_next_item_flag:
+                i += 1
+        else:
+            if not isinstance(current_content, str):
+                current_processed_item["content"] = str(current_content) if current_content is not None else ""
+
+            preprocessed_history.append(current_processed_item)
+            i += 1
+
     return processed_message, preprocessed_history
 
 
@@ -187,6 +254,118 @@ def encode_image(image_path: Path):
         return f"data:{mime_types[suffix]};base64,{base64.b64encode(f.read()).decode('utf-8')}"
 
 
+def prepare_openai_message_content(text_input: Optional[str], file_paths: Optional[List[str]]) -> List[Dict]:
+    content_parts = []
+    current_text = str(text_input) if text_input is not None else ""
+
+    if file_paths:
+        for file_path_str in file_paths:
+            file = Path(file_path_str)
+            if not file.is_file():
+                logger.warning(f"File not found: {file_path_str}, skipping.")
+                continue
+
+            suffix = file.suffix.lower()
+            if suffix in [".png", ".jpg", ".jpeg", ".heif", ".heic"]:  # Image
+                try:
+                    image_base64 = encode_image(file)
+                    content_parts.append({"type": "image_url", "image_url": {"url": image_base64}})
+                except Exception as e:
+                    logger.error(f"Failed to encode image {file_path_str}: {e}")
+            else:
+                file_content = file_manager.load_file(file)
+                if file_content:
+                    current_text += "\n" + file_content
+                else:
+                    logger.warning(f"Could not load content from file: {file_path_str}")
+
+    if current_text or not content_parts:
+        content_parts.insert(0, {"type": "text", "text": current_text.strip()})
+
+    return content_parts
+
+
+def build_openai_api_messages(current_message_dict: Dict, history_list: List[Dict], system_prompt: Optional[str], ) -> List[Dict]:
+    api_messages = []
+    if system_prompt and system_prompt.strip():
+        api_messages.append({"role": "system", "content": system_prompt})
+
+    i = 0
+    while i < len(history_list):
+        hist_item = history_list[i]
+        role = hist_item.get("role")
+        content = hist_item.get("content")
+
+        if role not in ("user", "assistant", "tool"):
+            logger.warning(f"Skipping history item with unexpected role: {role}")
+            i += 1
+            continue
+
+        if isinstance(content, tuple):
+            files_in_hist_item = list(content)
+            text_for_files = None
+            if i + 1 < len(history_list) and \
+                    history_list[i + 1].get("role") == role and \
+                    isinstance(history_list[i + 1].get("content"), str):
+                text_for_files = history_list[i + 1]["content"]
+                i += 1
+
+            processed_content_parts = prepare_openai_message_content(text_for_files, files_in_hist_item)
+        elif isinstance(content, str):
+            processed_content_parts = prepare_openai_message_content(content, None)
+        elif isinstance(content, list):
+            processed_content_parts = content
+        else:
+            logger.warning(f"Skipping history item with unexpected content type: {type(content)}")
+            i += 1
+            continue
+
+        if processed_content_parts:
+            api_messages.append({"role": role, "content": processed_content_parts})
+        i += 1
+
+    user_text = current_message_dict.get("text")
+    user_files = current_message_dict.get("files")
+    current_user_content_parts = prepare_openai_message_content(user_text, user_files)
+    if current_user_content_parts:
+        api_messages.append({"role": "user", "content": current_user_content_parts})
+
+    return api_messages
+
+
+def prepare_generic_model_inputs(current_message_dict: Dict, history_list: List[Dict], system_prompt: Optional[str], model_instance: Union[Model, VisionModel]) -> Tuple[str, List[Dict], List[str]]:
+    effective_history = []
+    if system_prompt and system_prompt.strip() != "":
+        effective_history.append(Message(MessageRole.SYSTEM, content=system_prompt).to_dict())
+    effective_history.extend(history_list)
+
+    image_paths = []
+    if isinstance(model_instance, VisionModel):
+        for hist_item in effective_history:
+            files_to_check = []
+            if isinstance(hist_item.get("content"), tuple):
+                files_to_check.extend(list(hist_item["content"]))
+            elif isinstance(hist_item.get("files"), list):
+                files_to_check.extend(hist_item["files"])
+
+            for file_path_str in files_to_check:
+                path = Path(file_path_str)
+                if path.is_file() and path.suffix.lower() in [".jpg", ".png", ".jpeg"]:
+                    image_paths.append(file_path_str)
+
+        if "files" in current_message_dict and current_message_dict["files"]:
+            for file_path_str in current_message_dict["files"]:
+                path = Path(file_path_str)
+                if path.is_file() and path.suffix.lower() in [".jpg", ".png", ".jpeg"]:
+                    image_paths.append(file_path_str)
+
+        image_paths = list(set(image_paths))
+
+    processed_message_text, processed_history_list = preprocess_file(current_message_dict, effective_history)
+
+    return processed_message_text, processed_history_list, image_paths
+
+
 def handle_chat(message: Dict,
                 history: List[Dict],
                 system_prompt: str = None,
@@ -197,143 +376,92 @@ def handle_chat(message: Dict,
                 stream: bool = True):
     try:
         model = get_loaded_model()
+
         if isinstance(model, OpenAIModel):
-            if system_prompt and system_prompt.strip() != "":
-                history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
-            messages = []
-            i = 0
-            while i < len(history):
-                h = history[i]
-                if isinstance(h["content"], tuple):
-                    msg = {
-                        "role": h["role"],
-                        "content": []
-                    }
-                    if i + 1 < len(history):
-                        i += 1
-                        next_history = history[i]
-                        if "content" in next_history:
-                            msg["content"].append({"type": "text", "text": next_history["content"]})
-                    for file in h["content"]:
-                        file = Path(file)
-                        suffix = file.suffix.lower()
-                        if file.is_file() and suffix in [".png", ".jpg", ".jpeg", ".heif", ".heic"]:
-                            image_base64 = encode_image(file)
-                            msg["content"].append({
-                                "type": "image_url",
-                                "image_url": {
-                                    "url": image_base64
-                                }
-                            })
-                        elif file.is_file():
-                            file_content = file_manager.load_file(file)
-                            msg["content"][0]["text"] += file_content if file_content else ""
-                    messages.append(msg)
-                else:
-                    messages.append(
-                        {
-                            "role": h["role"],
-                            "content": h["content"]
-                        }
-                    )
-                i += 1
-            if "files" in message and message["files"]:
-                msg = {
-                    "role": "user",
-                    "content": [
-                        {"type": "text", "text": message["text"]}
-                    ]
-                }
-                for file in message["files"]:
-                    file = Path(file)
-                    suffix = file.suffix.lower()
-                    if file.is_file() and suffix in [".png", ".jpg", ".jpeg", ".heif", ".heic"]:
-                        image_base64 = encode_image(file)
-                        msg["content"].append({
-                            "type": "image_url",
-                            "image_url": {
-                                "url": image_base64
-                            }
-                        })
-                    elif file.is_file():
-                        file_content = file_manager.load_file(file)
-                        msg["content"][0]["text"] += file_content if file_content else ""
-                messages.append(msg)
-            else:
-                messages.append(Message(MessageRole.USER, content=message["text"]).to_dict())
-            result = ChatMessage(role="assistant", content="")
-            response = model.generate_response(messages=messages,
-                                               stream=stream,
-                                               temperature=temperature,
-                                               top_p=top_p,
-                                               max_tokens=max_tokens,
-                                               n=1)
+            api_messages = build_openai_api_messages(message, history, system_prompt)
+
+            response_stream = model.generate_response(messages=api_messages, stream=stream, temperature=temperature, top_p=top_p, max_tokens=max_tokens, n=1)
+
+            chat_message_accumulator = ChatMessage(role="assistant", content="")
             if stream:
-                for chunk in response:
-                    content = chunk.choices[0].delta.content
-                    if content:
-                        result.content += content
-                        yield result
+                for chunk in response_stream:
+                    if chunk.choices:
+                        delta = chunk.choices[0].delta
+                        if delta.content:
+                            chat_message_accumulator.content += delta.content
+                            yield chat_message_accumulator
             else:
-                ChatMessage(role="assistant", content=response.choices[0].message)
+                if response_stream.choices:
+                    full_content = response_stream.choices[0].message.content
+                    chat_message_accumulator.content = full_content
+                    yield chat_message_accumulator
+                else:
+                    logger.error("OpenAI non-stream response had no choices.")
+                    yield ChatMessage(role="assistant", content="Error: No response from model.")
         else:
+            tokenizer_to_check = None
             if isinstance(model, VisionModel):
-                if model.processor.tokenizer.chat_template is None:
-                    raise RuntimeError("No chat template.")
-            else:
-                if model.tokenizer.chat_template is None:
-                    raise RuntimeError("No chat template.")
+                if model.processor and hasattr(model.processor, 'tokenizer'):
+                    tokenizer_to_check = model.processor.tokenizer
+            elif hasattr(model, 'tokenizer'):
+                tokenizer_to_check = model.tokenizer
 
-            if system_prompt and system_prompt.strip() != "":
-                history = [Message(MessageRole.SYSTEM, content=system_prompt).to_dict()] + history
+            if tokenizer_to_check and tokenizer_to_check.chat_template is None:
+                raise RuntimeError("Model {} does not have a chat template. Please use the 'Completion' tab or set a chat template.".format(model.model_name if hasattr(model, 'model_name') else type(model).__name__))
 
-            images = []
-            if isinstance(model, VisionModel):
-                for h in history:
-                    if "content" in h:
-                        for file in h["content"]:
-                            if Path(file).is_file() and Path(file).suffix.lower() in [".jpg", ".png", ".jpeg"]:
-                                images.append(file)
-                if "files" in message:
-                    for file in message["files"]:
-                        if Path(file).is_file() and Path(file).suffix.lower() in [".jpg", ".png", ".jpeg"]:
-                            images.append(file)
-
-            message, history = preprocess_file(message, history)
+            processed_message_text, processed_history_list, image_paths = prepare_generic_model_inputs(message, history, system_prompt, model)
 
             temperature = float(temperature)
             top_p = float(top_p)
             repetition_penalty = float(repetition_penalty)
 
-            response = ChatMessage(role="assistant", content="")
+            response_args = {
+                "message": processed_message_text,
+                "history": processed_history_list,
+                "stream": stream,
+                "temperature": temperature,
+                "top_p": top_p,
+                "max_tokens": max_tokens,
+                "repetition_penalty": repetition_penalty,
+            }
             if isinstance(model, VisionModel):
-                eos_token = model.processor.tokenizer.eos_token
-                for chunk in model.generate_response(
-                        message=message,
-                        images=images,
-                        history=history,
-                        stream=stream,
-                        temperature=temperature,
-                        top_p=top_p,
-                        max_tokens=max_tokens,
-                        repetition_penalty=repetition_penalty):
-                    if eos_token not in chunk:
-                        response.content += chunk
-                        yield response
+                response_args["images"] = image_paths
+                eos_token = model.processor.tokenizer.eos_token if model.processor and model.processor.tokenizer else None
             else:
-                eos_token = model.tokenizer.eos_token
-                for chunk in model.generate_response(
-                        message=message,
-                        history=history,
-                        stream=stream,
-                        temperature=temperature,
-                        top_p=top_p,
-                        max_tokens=max_tokens,
-                        repetition_penalty=repetition_penalty):
-                    if eos_token not in chunk.text:
-                        response.content += chunk.text
-                        yield response
+                eos_token = model.tokenizer.eos_token if model.tokenizer else None
+
+            response_stream = model.generate_response(**response_args)
+
+            chat_message_accumulator = ChatMessage(role="assistant", content="")
+            for chunk in response_stream:
+                chunk_text = ""
+                if isinstance(chunk, str):
+                    chunk_text = chunk
+                elif hasattr(chunk, "text"):
+                    chunk_text = chunk.text
+                elif hasattr(chunk, "choices") and chunk.choices and hasattr(chunk.choices[0], "delta") and chunk.choices[0].delta.content:
+                    chunk_text = chunk.choices[0].delta.content
+                else:
+                    logger.warning(f"Unexpected chunk type from model: {type(chunk)}")
+
+                if chunk_text:
+                    if stream and eos_token and eos_token in chunk_text:
+                        if chunk_text == eos_token:
+                            break
+                        if eos_token and eos_token in chunk_text:
+                            chunk_text = chunk_text.split(eos_token)[0]
+
+                        chat_message_accumulator.content += chunk_text
+                        if eos_token and eos_token in chunk_text:
+                            break
+                    elif not (stream and eos_token and eos_token in chunk_text):
+                        chat_message_accumulator.content += chunk_text
+                    if stream:
+                        yield chat_message_accumulator
+            if not stream:
+                yield chat_message_accumulator
     except Exception as e:
+        logger.exception("Error in handle_chat:")
         raise gr.Error(str(e))
 
 
@@ -429,6 +557,44 @@ def add_api_model(model_name: str, api_key: str, nick_name: Optional[str] = None
         raise gr.Error(str(e))
 
 
+def update_slider_config(slider_new_min: Union[int, float], slider_new_max: Union[int, float], slider_value: Union[int, float]):
+    if not slider_new_min or not slider_new_max:
+        return gr.update()
+
+    if slider_new_min > slider_new_max:
+        return gr.update()
+
+    value_to_set = slider_value if slider_value is not None else (slider_new_min + slider_new_max) / 2
+
+    if isinstance(slider_new_min, int) and isinstance(slider_new_max, int):
+        value_to_set = int(value_to_set)
+
+    if value_to_set < slider_new_min:
+        value_to_set = slider_new_min
+
+    if value_to_set > slider_new_max:
+        value_to_set = slider_new_max
+
+    return gr.update(minimum=slider_new_min, maximum=slider_new_max, value=value_to_set)
+
+
+def update_model_max_length(slider_value: Union[int, float]):
+    model = model_manager.get_loaded_model()
+    if model is not None:
+        if isinstance(model, OpenAIModel):
+            return update_slider_config(1, 1048576, slider_value)
+        try:
+            model_max_length = model.tokenizer.model_max_length
+            if model_max_length is None or model_max_length <= 0:
+                model_max_length = 32768
+        except Exception as e:
+            model_max_length = 32768
+            logger.error("Error while updating model max length.")
+        return update_slider_config(1, model_max_length, slider_value)
+    else:
+        return gr.update()
+
+
 with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     gr.HTML("<h1>Chat with MLX</h1>")
 
@@ -455,6 +621,14 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                         fn=lambda x: x,
                         inputs=[chat_load_model_block.model_status_textbox],
                         outputs=[completion_load_model_block.model_status_textbox]
+                    ).then(
+                        fn=update_model_max_length,
+                        inputs=[chat_advanced_setting_block.max_tokens_slider],
+                        outputs=[chat_advanced_setting_block.max_tokens_slider]
+                    ).then(
+                        fn=update_model_max_length,
+                        inputs=[completion_advanced_setting_block.max_tokens_slider],
+                        outputs=[completion_advanced_setting_block.max_tokens_slider]
                     )
 
                 with gr.Accordion(label=get_text("Page.Chat.Accordion.AdvancedSetting.label"), open=False):
@@ -529,6 +703,14 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     fn=lambda x: x,
                     inputs=[completion_load_model_block.model_status_textbox],
                     outputs=[chat_load_model_block.model_status_textbox]
+                ).then(
+                    fn=update_model_max_length,
+                    inputs=[chat_advanced_setting_block.max_tokens_slider],
+                    outputs=[chat_advanced_setting_block.max_tokens_slider]
+                ).then(
+                    fn=update_model_max_length,
+                    inputs=[completion_advanced_setting_block.max_tokens_slider],
+                    outputs=[completion_advanced_setting_block.max_tokens_slider]
                 )
 
                 with gr.Row(visible=False):
@@ -643,6 +825,14 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         outputs=[
             completion_load_model_block.model_selector_dropdown
         ]
+    ).then(
+        fn=update_model_max_length,
+        inputs=[chat_advanced_setting_block.max_tokens_slider],
+        outputs=[chat_advanced_setting_block.max_tokens_slider]
+    ).then(
+        fn=update_model_max_length,
+        inputs=[completion_advanced_setting_block.max_tokens_slider],
+        outputs=[completion_advanced_setting_block.max_tokens_slider]
     )
 
 
@@ -655,8 +845,8 @@ atexit.register(exit_handler)
 
 
 def start(port: int, share: bool = False, in_browser: bool = True) -> None:
-    print(f"Starting the app on port {port} with share={share} and in_browser={in_browser}")
-    app.launch(server_port=port, inbrowser=in_browser, share=share)
+    logger.info(f"Starting the app on port {port} with share={share} and in_browser={in_browser}")
+    app.launch(server_port=port, inbrowser=in_browser, share=share, pwa=True)
 
 
 def main():

@@ -9,7 +9,6 @@ from typing import Dict, Union, List, Optional
 
 import mlx
 import mlx_vlm
-from huggingface_hub import snapshot_download
 from mlx_lm import load, generate, stream_generate, sample_utils
 from openai import OpenAI
 
@@ -42,45 +41,16 @@ class Model:
         except Exception as e:
             raise RuntimeError("Failed to load model {}: {}".format(self.model_path, e))
 
-    def generate_completion(
-            self,
-            prompt: str,
-            stream: bool = False,
-            temperature: float = 0.7,
-            top_p: float = 0.9,
-            max_tokens: int = 512,
-            repetition_penalty: float = 1.0
-    ):
+    def generate_completion(self, prompt: str, stream: bool = False, temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512, repetition_penalty: float = 1.0):
         try:
             if stream:
-                return self._stream_generate(
-                    prompt=prompt,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty
-                )
+                return self._stream_generate(prompt=prompt, temperature=temperature, top_p=top_p, max_tokens=max_tokens, repetition_penalty=repetition_penalty)
             else:
-                return self._generate(
-                    prompt=prompt,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty
-                )
+                return self._generate(prompt=prompt, temperature=temperature, top_p=top_p, max_tokens=max_tokens, repetition_penalty=repetition_penalty)
         except Exception as e:
             raise e
 
-    def generate_response(
-            self,
-            message: str,
-            history: Union[str, List[Dict]],
-            stream: bool = False,
-            temperature: float = 0.7,
-            top_p: float = 0.9,
-            max_tokens: int = 512,
-            repetition_penalty: float = 1.0
-    ):
+    def generate_response(self, message: str, history: Union[str, List[Dict]], stream: bool = False, temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512, repetition_penalty: float = 1.0):
         message = [Message(MessageRole.USER, message).to_dict()]
 
         conversation = history + message
@@ -89,51 +59,21 @@ class Model:
 
         try:
             if stream:
-                return self._stream_generate(
-                    prompt=formatted_prompt,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty
-                )
+                return self._stream_generate(prompt=formatted_prompt, temperature=temperature, top_p=top_p, max_tokens=max_tokens, repetition_penalty=repetition_penalty)
             else:
-                return self._generate(
-                    prompt=formatted_prompt,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty
-                )
+                return self._generate(prompt=formatted_prompt, temperature=temperature, top_p=top_p, max_tokens=max_tokens, repetition_penalty=repetition_penalty)
         except Exception as e:
             raise e
 
     def _generate(self, prompt: str, temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
         sampler = sample_utils.make_sampler(temp=temperature, top_p=top_p)
-        logits_processors = sample_utils.make_logits_processors(
-            repetition_penalty=repetition_penalty
-        )
-        return generate(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            prompt=prompt,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            max_tokens=max_tokens
-        )
+        logits_processors = sample_utils.make_logits_processors(repetition_penalty=repetition_penalty)
+        return generate(model=self.model, tokenizer=self.tokenizer, prompt=prompt, sampler=sampler, logits_processors=logits_processors, max_tokens=max_tokens)
 
     def _stream_generate(self, prompt: str, temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
         sampler = sample_utils.make_sampler(temp=temperature, top_p=top_p)
-        logits_processors = sample_utils.make_logits_processors(
-            repetition_penalty=repetition_penalty
-        )
-        return stream_generate(
-            model=self.model,
-            tokenizer=self.tokenizer,
-            prompt=prompt,
-            sampler=sampler,
-            logits_processors=logits_processors,
-            max_tokens=max_tokens
-        )
+        logits_processors = sample_utils.make_logits_processors(repetition_penalty=repetition_penalty)
+        return stream_generate(model=self.model, tokenizer=self.tokenizer, prompt=prompt, sampler=sampler, logits_processors=logits_processors, max_tokens=max_tokens)
 
     def close(self):
         del self.model
@@ -157,52 +97,19 @@ class VisionModel:
         except Exception as e:
             raise RuntimeError("Failed to load {}: {}".format(self.model_path, e))
 
-    def generate_completion(
-            self,
-            prompt: str,
-            images: List[str],
-            stream: bool = False,
-            temperature: float = 0.7,
-            top_p: float = 0.9,
-            max_tokens: int = 512,
-            repetition_penalty: float = 1.0
-    ):
+    def generate_completion(self, prompt: str, images: List[str], stream: bool = False, temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512, repetition_penalty: float = 1.0):
         if not images or len(images) == 0:
             raise RuntimeError("Text only chat is not supported.")
 
         try:
             if stream:
-                return self._stream_generate(
-                    prompt=prompt,
-                    images=images,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty
-                )
+                return self._stream_generate(prompt=prompt, images=images, temperature=temperature, top_p=top_p, max_tokens=max_tokens, repetition_penalty=repetition_penalty)
             else:
-                return self._generate(
-                    prompt=prompt,
-                    images=images,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty
-                )
+                return self._generate(prompt=prompt, images=images, temperature=temperature, top_p=top_p, max_tokens=max_tokens, repetition_penalty=repetition_penalty)
         except Exception as e:
             raise e
 
-    def generate_response(
-            self,
-            message: str,
-            images: List[str],
-            history: Union[str, List[Dict]],
-            stream: bool = False,
-            temperature: float = 0.7,
-            top_p: float = 0.9,
-            max_tokens: int = 512,
-            repetition_penalty: float = 1.0
-    ):
+    def generate_response(self, message: str, images: List[str], history: Union[str, List[Dict]], stream: bool = False, temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512, repetition_penalty: float = 1.0):
         if not images or len(images) == 0:
             raise RuntimeError("Text only chat is not supported.")
 
@@ -214,51 +121,19 @@ class VisionModel:
 
         try:
             if stream:
-                return self._stream_generate(
-                    prompt=formatted_prompt,
-                    images=images,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty
-                )
+                return self._stream_generate(prompt=formatted_prompt, images=images, temperature=temperature, top_p=top_p, max_tokens=max_tokens, repetition_penalty=repetition_penalty)
             else:
-                return self._generate(
-                    prompt=formatted_prompt,
-                    images=images,
-                    temperature=temperature,
-                    top_p=top_p,
-                    max_tokens=max_tokens,
-                    repetition_penalty=repetition_penalty
-                )
+                return self._generate(prompt=formatted_prompt, images=images, temperature=temperature, top_p=top_p, max_tokens=max_tokens, repetition_penalty=repetition_penalty)
         except Exception as e:
             raise e
 
     def _generate(self, prompt: str, images: list[str], temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
-        return mlx_vlm.utils.generate(
-            model=self.model,
-            processor=self.processor,
-            image_processor=self.image_processor,
-            prompt=prompt,
-            image=images,
-            temp=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            repetition_penalty=repetition_penalty
-        )
+        return mlx_vlm.utils.generate(model=self.model, processor=self.processor, image_processor=self.image_processor, prompt=prompt, image=images, temp=temperature, top_p=top_p, max_tokens=max_tokens,
+            repetition_penalty=repetition_penalty)
 
     def _stream_generate(self, prompt: str, images: list[str], temperature: float, top_p: float, max_tokens: int, repetition_penalty: float):
-        return mlx_vlm.utils.stream_generate(
-            model=self.model,
-            processor=self.processor,
-            image_processor=self.image_processor,
-            prompt=prompt,
-            image=images,
-            temp=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            repetition_penalty=repetition_penalty
-        )
+        return mlx_vlm.utils.stream_generate(model=self.model, processor=self.processor, image_processor=self.image_processor, prompt=prompt, image=images, temp=temperature, top_p=top_p, max_tokens=max_tokens,
+            repetition_penalty=repetition_penalty)
 
     def close(self):
         del self.model
@@ -277,189 +152,244 @@ class OpenAIModel:
         self.model_name = model_name
 
     def generate_response(self, messages: List, reasoning_effort: str = None, stream: bool = False, **kwargs):
-        return self.client.chat.completions.create(
-            model=self.model_name,
-            messages=messages,
-            reasoning_effort=reasoning_effort,
-            stream=stream,
-            **kwargs
-        )
+        return self.client.chat.completions.create(model=self.model_name, messages=messages, reasoning_effort=reasoning_effort, stream=stream, **kwargs)
 
     def close(self):
         del self.client
         del self.api_key
 
 
+class ModelType(enum.Enum):
+    LOCAL = "local"
+    OPENAI_API = "openai_api"
+
+
 class ModelManager:
+    VALID_QUANTIZE_TYPES = {"None", "4bit", "8bit", "bf16", "bf32"}
+    VALID_LANGUAGES = {"multi"}
+    VALID_MULTIMODAL_ABILITIES = {"None", "vision"}
+    CONFIG_EXTENSION = ".json"
+
     def __init__(self, base_dir: Optional[str] = None):
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent / "models"
         self.configs_dir = self.base_dir / "configs"
         self.models_dir = self.base_dir / "models"
 
-        self.base_dir.mkdir(parents=True, exist_ok=True)
-        self.configs_dir.mkdir(parents=True, exist_ok=True)
-        self.models_dir.mkdir(parents=True, exist_ok=True)
-
-        if not (self.base_dir.is_dir() and self.configs_dir.is_dir() and self.models_dir.is_dir()):
-            raise IOError("Failed to create the required directory structure.")
+        self._setup_directories()
 
         self.model: Optional[Model] = None
-        self.model_config: Optional[Dict[str, str]] = None
-        self.model_configs: Dict[str, Dict[str, str]] = self.scan_models()
+        self.model_config: Optional[Dict[str, Union[str, List[str]]]] = None
+        self.model_configs: Dict[str, Dict[str, Union[str, List[str]]]] = self.scan_models()
 
-    def get_config_path(self, model_config: Dict[str, str]) -> Path:
-        if "type" in model_config and model_config.get("type") == "openai_api":
+    def _setup_directories(self) -> None:
+        directories = [self.base_dir, self.configs_dir, self.models_dir]
+
+        for directory in directories:
+            directory.mkdir(parents=True, exist_ok=True)
+
+        if not all(d.is_dir() for d in directories):
+            raise IOError("Failed to create the required directory structure.")
+
+    def _validate_repo_format(self, repo: str, name: str) -> None:
+        if len(repo.strip().split("/")) != 2:
+            raise ValueError(f"'{name}' must be in 'owner/repo' format.")
+
+    def _validate_quantize(self, quantize: str) -> None:
+        if quantize not in self.VALID_QUANTIZE_TYPES:
+            raise ValueError(f"quantize must be one of {self.VALID_QUANTIZE_TYPES}.")
+
+    def _validate_multimodal_ability(self, abilities: Optional[List[str]]) -> None:
+        if not abilities:
+            return
+
+        if "None" in abilities and len(abilities) > 1:
+            raise ValueError("'None' cannot exist with other abilities.")
+
+        invalid_abilities = set(abilities) - self.VALID_MULTIMODAL_ABILITIES
+        if invalid_abilities:
+            raise ValueError(f"Invalid multimodal abilities: {invalid_abilities}")
+
+    def _extract_repo_name(self, repo: str) -> str:
+        return repo.strip().split('/')[-1]
+
+    def _generate_display_name(self, model_config: Dict[str, Union[str, List[str]]]) -> str:
+        if model_config.get("type") == ModelType.OPENAI_API.value:
+            model_name = model_config["model_name"]
+            nick_name = model_config.get("nick_name")
+            return f"{nick_name or model_name}({ModelType.OPENAI_API.value})"
+
+        model_name = model_config["model_name"]
+        default_language = model_config["default_language"]
+        quantize = model_config.get("quantize") or "None"
+        multimodal_ability = model_config.get("multimodal_ability", [])
+
+        if multimodal_ability and "None" not in multimodal_ability:
+            abilities_str = "".join(multimodal_ability)
+            return f"{model_name}({default_language},{quantize},{abilities_str})"
+
+        return f"{model_name}({default_language},{quantize})"
+
+    def get_config_path(self, model_config: Dict[str, Union[str, List[str]]]) -> Path:
+        if model_config.get("type") == ModelType.OPENAI_API.value:
             model_name = model_config.get('model_name')
             if not model_name:
                 raise RuntimeError("'model_name' not specified for OpenAI API Model.")
-            return self.configs_dir / "{}.json".format(model_name)
-        else:
-            mlx_repo = model_config.get("mlx_repo")
-            if not mlx_repo:
-                model_name = model_config.get('model_name', 'unknown')
-                raise RuntimeError("'mlx_repo' not specified for model '{}'.".format(model_name))
-            mlx_repo_name = mlx_repo.strip().split('/')[-1]
-            return self.configs_dir / f"{mlx_repo_name}.json"
+            return self.configs_dir / f"{model_name}{self.CONFIG_EXTENSION}"
 
-    def get_model_path(self, model_config: Dict[str, str]) -> Path:
         mlx_repo = model_config.get("mlx_repo")
         if not mlx_repo:
             model_name = model_config.get('model_name', 'unknown')
-            raise RuntimeError("'mlx_repo' not specified for model '{}'.".format(model_name))
-        mlx_repo_name = mlx_repo.strip().split('/')[-1]
-        return self.models_dir / mlx_repo_name
+            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
+
+        repo_name = self._extract_repo_name(mlx_repo)
+        return self.configs_dir / f"{repo_name}{self.CONFIG_EXTENSION}"
+
+    def get_model_path(self, model_config: Dict[str, Union[str, List[str]]]) -> Path:
+        mlx_repo = model_config.get("mlx_repo")
+        if not mlx_repo:
+            model_name = model_config.get('model_name', 'unknown')
+            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
+
+        return self.models_dir / self._extract_repo_name(mlx_repo)
 
     def get_model_list(self) -> List[str]:
-        self.model_configs: Dict[str, Dict[str, str]] = self.scan_models()
+        self.model_configs = self.scan_models()
         return sorted(self.model_configs.keys())
 
-    def create_config_json(self, model_config: Dict[str, str]):
+    def create_config_json(self, model_config: Dict[str, Union[str, List[str]]]) -> None:
         config_path = self.get_config_path(model_config)
         with config_path.open("w", encoding="utf-8") as f:
             json.dump(model_config, f, ensure_ascii=False, indent=4)
 
-    def add_config(
-            self,
-            original_repo: str,
-            mlx_repo: str,
-            model_name: Optional[str] = None,
-            quantize: Optional[str] = None,
-            default_language: str = "multi",
-            system_prompt: Optional[str] = None,
-            multimodal_ability: Optional[List[str]] = None,
-    ):
-        if len(original_repo.strip().split("/")) != 2 or len(mlx_repo.strip().split("/")) != 2:
-            raise RuntimeError("'original_repo' or 'mlx_repo' not in compliance with the specification.")
-        if quantize not in ["None", "4bit", "8bit", "bf16", "bf32"]:
-            raise RuntimeError("quantize must be one of 'None', '4bit', '8bit', 'bf16', 'bf32'.")
-        if default_language not in ["multi"]:
-            raise RuntimeError("default_language must be one of 'multi'.")
-        if system_prompt and system_prompt.strip() == "":
-            system_prompt = None
-        if multimodal_ability:
-            if "None" in multimodal_ability and len(multimodal_ability) > 1:
-                raise RuntimeError("'None' cannot exist with other abilities.")
-            for ability in multimodal_ability:
-                if ability not in ["None", "vision"]:
-                    raise RuntimeError("multimodal_ability must be one of 'None', 'vision'.")
-        model_config = {
-            "original_repo": original_repo.strip(),
-            "mlx_repo": mlx_repo.strip(),
-            "model_name": model_name.strip() if model_name and model_name.strip() != "" else mlx_repo.strip().split("/")[-1],
-            "quantize": None if quantize == "None" else quantize,
-            "default_language": default_language,
-            "system_prompt": system_prompt,
-            "multimodal_ability": [] if multimodal_ability == ["None"] else multimodal_ability
-        }
-        self.create_config_json(model_config)
-        if multimodal_ability and len(multimodal_ability) > 0 and "None" not in multimodal_ability:
-            display_name = "{}({},{},{})".format(model_config['model_name'], default_language, quantize, "".join(multimodal_ability))
-        else:
-            display_name = "{}({},{})".format(model_config['model_name'], default_language, quantize)
+    def add_config(self, original_repo: str, mlx_repo: str, model_name: Optional[str] = None, quantize: str = "None", default_language: str = "multi", system_prompt: Optional[str] = None,
+            multimodal_ability: Optional[List[str]] = None, ) -> None:
+        self._validate_repo_format(original_repo, "original_repo")
+        self._validate_repo_format(mlx_repo, "mlx_repo")
+        self._validate_quantize(quantize)
+
+        if default_language not in self.VALID_LANGUAGES:
+            raise ValueError(f"default_language must be one of {self.VALID_LANGUAGES}.")
+
+        self._validate_multimodal_ability(multimodal_ability)
+
+        system_prompt = system_prompt.strip() if system_prompt and system_prompt.strip() else None
+        final_model_name = (model_name.strip() if model_name and model_name.strip() else self._extract_repo_name(mlx_repo))
+
+        model_config = {"original_repo": original_repo.strip(), "mlx_repo": mlx_repo.strip(), "model_name": final_model_name, "quantize": None if quantize == "None" else quantize, "default_language": default_language,
+            "system_prompt": system_prompt, "multimodal_ability": [] if multimodal_ability == ["None"] else (multimodal_ability or [])}
+
+        display_name = self._generate_display_name(model_config)
         model_config["display_name"] = display_name
+
+        self.create_config_json(model_config)
         self.model_configs[display_name] = model_config
 
     def add_api_config(self, model_name: str, api_key: str, nick_name: Optional[str], base_url: Optional[str] = None, system_prompt: Optional[str] = None):
         if not model_name or not api_key:
-            raise RuntimeError("model_name and api_key are required.")
-        model_config = {
-            "model_name": model_name,
-            "api_key": api_key,
-            "base_url": base_url,
-            "nick_name": nick_name,
-            "system_prompt": system_prompt,
-            "type": "openai_api"
-        }
-        self.create_config_json(model_config)
-        display_name = "{}({})".format(nick_name if nick_name else model_name, model_config['type'])
+            raise ValueError("model_name and api_key are required.")
+
+        model_config = {"model_name": model_name, "api_key": api_key, "base_url": base_url, "nick_name": nick_name, "system_prompt": system_prompt, "type": ModelType.OPENAI_API.value}
+
+        display_name = self._generate_display_name(model_config)
         model_config["display_name"] = display_name
+
+        self.create_config_json(model_config)
         self.model_configs[display_name] = model_config
 
-    def scan_models(self) -> Dict[str, Dict[str, str]]:
+    def _process_config_file(self, config_file: Path) -> Optional[tuple]:
+        try:
+            with config_file.open("r", encoding="utf-8") as f:
+                model_config = json.load(f)
+        except json.JSONDecodeError as e:
+            logging.error(f"Error decoding JSON from {config_file}: {e}")
+            return None
+
+        if model_config.get("type") == ModelType.OPENAI_API.value:
+            return self._process_api_config(model_config)
+        else:
+            return self._process_local_config(model_config)
+
+    def _process_api_config(self, model_config: Dict) -> Optional[tuple]:
+        api_key = model_config.get("api_key")
+        if not api_key or not api_key.strip():
+            return None
+
+        display_name = self._generate_display_name(model_config)
+        model_config["display_name"] = display_name
+        return display_name, model_config
+
+    def _process_local_config(self, model_config: Dict) -> Optional[tuple]:
+        model_name = model_config.get("model_name")
+        default_language = model_config.get("default_language")
+
+        if not all([model_name, default_language]):
+            return None
+
+        if "quantize" not in model_config or not model_config["quantize"]:
+            model_config["quantize"] = "None"
+
+        display_name = self._generate_display_name(model_config)
+        model_config["display_name"] = display_name
+        return display_name, model_config
+
+    def scan_models(self) -> Dict[str, Dict[str, Union[str, List[str]]]]:
         model_configs = {}
-        for config_file in self.configs_dir.glob("*.json"):
-            if config_file.is_file():
-                try:
-                    with config_file.open("r", encoding="utf-8") as f:
-                        model_config = json.load(f)
-                    model_name = model_config.get("model_name")
-                    if "type" in model_config and model_config.get("type") == "openai_api":
-                        api_key = model_config.get("api_key")
-                        if not api_key or api_key.strip() == "":
-                            logging.info("Skipping incomplete config: {}".format(config_file))
-                            continue
-                        nick_name = model_config.get("nick_name")
-                        display_name = "{}({})".format(nick_name if nick_name else model_config['model_name'], model_config['type'])
-                        model_config["display_name"] = display_name
-                        model_configs[display_name] = model_config
-                    else:
-                        default_language = model_config.get("default_language")
-                        quantize = model_config.get("quantize") if model_config.get("quantize") else "None"
-                        if not all([model_name, default_language, quantize]):
-                            logging.info("Skipping incomplete config: {}".format(config_file))
-                            continue
-                        multimodal_ability = model_config.get("multimodal_ability")
-                        if multimodal_ability and len(multimodal_ability) > 0 and "None" not in multimodal_ability:
-                            display_name = "{}({},{},{})".format(model_name, default_language, quantize, "".join(multimodal_ability))
-                        else:
-                            display_name = "{}({},{})".format(model_name, default_language, quantize)
-                        model_config["display_name"] = display_name
-                        model_configs[display_name] = model_config
-                except json.JSONDecodeError as e:
-                    logging.error("Error decoding JSON from {}: {}".format(config_file, e))
+
+        for config_file in self.configs_dir.glob(f"*{self.CONFIG_EXTENSION}"):
+            if not config_file.is_file():
+                continue
+
+            result = self._process_config_file(config_file)
+            if result:
+                display_name, processed_config = result
+                model_configs[display_name] = processed_config
+            else:
+                logging.info(f"Skipping incomplete config: {config_file}")
+
         return model_configs
 
-    def load_model(self, model_name: str):
+    def load_model(self, model_name: str) -> None:
         if self.model:
             self.close_model()
 
         model_config = self.model_configs.get(model_name)
         if not model_config:
-            raise RuntimeError("Model '{}' not found.".format(model_name))
+            raise RuntimeError(f"Model '{model_name}' not found.")
 
-        if "type" in model_config and model_config.get("type") == "openai_api":
-            try:
-                self.model = OpenAIModel(model_config.get("api_key"), model_config.get("model_name"), model_config.get("base_url"))
-                self.model_config = model_config
-            except Exception as e:
-                raise RuntimeError("Error loading model '{}'.".format(model_name))
-        else:
-            local_model_path = self.get_model_path(model_config)
-            if not local_model_path.exists():
-                mlx_repo = model_config.get("mlx_repo")
-                try:
-                    snapshot_download(repo_id=mlx_repo, local_dir=str(local_model_path))
-                except Exception as e:
-                    raise RuntimeError("Failed to download model from '{}': {}".format(mlx_repo, e))
+        try:
+            if model_config.get("type") == ModelType.OPENAI_API.value:
+                self._load_openai_model(model_config)
+            else:
+                self._load_local_model(model_config)
 
-            try:
-                multimodal_ability = model_config.get("multimodal_ability")
-                self.model = VisionModel(str(local_model_path)) if multimodal_ability and "vision" in multimodal_ability else Model(str(local_model_path))
-                self.model_config = model_config
-            except Exception as e:
-                raise RuntimeError("Failed to load model from '{}': {}".format(local_model_path, e))
+            self.model_config = model_config
+        except Exception as e:
+            raise RuntimeError(f"Error loading model '{model_name}': {e}")
 
-    def close_model(self):
+    def _load_openai_model(self, model_config: Dict) -> None:
+        self.model = OpenAIModel(model_config.get("api_key"), model_config.get("model_name"), model_config.get("base_url"))
+
+    def _load_local_model(self, model_config: Dict) -> None:
+        local_model_path = self.get_model_path(model_config)
+
+        if not local_model_path.exists():
+            self._download_model(model_config, local_model_path)
+
+        multimodal_ability = model_config.get("multimodal_ability", [])
+        is_vision_model = multimodal_ability and "vision" in multimodal_ability
+
+        ModelClass = VisionModel if is_vision_model else Model
+        self.model = ModelClass(str(local_model_path))
+
+    def _download_model(self, model_config: Dict, local_model_path: Path) -> None:
+        mlx_repo = model_config.get("mlx_repo")
+        try:
+            from huggingface_hub import snapshot_download
+            snapshot_download(repo_id=mlx_repo, local_dir=str(local_model_path))
+        except Exception as e:
+            raise RuntimeError(f"Failed to download model from '{mlx_repo}': {e}")
+
+    def close_model(self) -> None:
         if self.model:
             self.model.close()
             self.model = None
@@ -468,22 +398,20 @@ class ModelManager:
             mlx.core.clear_cache()
 
     def get_loaded_model(self) -> Optional[Model]:
-        if self.model:
-            model_ref = weakref.ref(self.model)
-            return model_ref()
-        else:
-            return None
+        return weakref.ref(self.model)() if self.model else None
 
-    def get_loaded_model_config(self) -> Optional[Dict[str, str]]:
+    def get_loaded_model_config(self) -> Optional[Dict[str, Union[str, List[str]]]]:
         return self.model_config
 
-    def get_system_prompt(self, default=False) -> Optional[str]:
-        if self.model_config:
-            if not default and "custom_system_prompt" in self.model_config:
-                return self.model_config.get("custom_system_prompt")
-            return self.model_config.get("system_prompt")
-        return None
+    def get_system_prompt(self, default: bool = False) -> Optional[str]:
+        if not self.model_config:
+            return None
 
-    def set_custom_prompt(self, custom_system_prompt: str):
+        if not default and "custom_system_prompt" in self.model_config:
+            return self.model_config.get("custom_system_prompt")
+
+        return self.model_config.get("system_prompt")
+
+    def set_custom_prompt(self, custom_system_prompt: str) -> None:
         if self.model_config:
             self.model_config["custom_system_prompt"] = custom_system_prompt
