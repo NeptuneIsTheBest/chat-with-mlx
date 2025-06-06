@@ -4,6 +4,8 @@ import base64
 import copy
 import hashlib
 import logging
+import re
+import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 
@@ -383,18 +385,113 @@ def handle_chat(message: Dict,
             response_stream = model.generate_response(messages=api_messages, stream=stream, temperature=temperature, top_p=top_p, max_tokens=max_tokens, n=1)
 
             chat_message_accumulator = ChatMessage(role="assistant", content="")
+            thinking_message = None
+            thinking_content = ""
+            final_content = ""
+            in_thinking = False
+            thinking_start_time = None
+
             if stream:
                 for chunk in response_stream:
                     if chunk.choices:
                         delta = chunk.choices[0].delta
                         if delta.content:
-                            chat_message_accumulator.content += delta.content
-                            yield chat_message_accumulator
+                            chunk_text = delta.content
+
+                            if "<think>" in chunk_text and not in_thinking:
+                                in_thinking = True
+                                thinking_start_time = time.time()
+                                thinking_message = ChatMessage(
+                                    role="assistant",
+                                    content="",
+                                    metadata={"title": "Thinking", "id": 0, "status": "pending"}
+                                )
+                                think_start_idx = chunk_text.find("<think>") + len("<think>")
+                                if think_start_idx < len(chunk_text):
+                                    thinking_content += chunk_text[think_start_idx:]
+                                    thinking_message.content = thinking_content
+                                yield thinking_message
+                                continue
+
+                            elif in_thinking and "</think>" not in chunk_text:
+                                thinking_content += chunk_text
+                                thinking_message.content = thinking_content
+                                yield thinking_message
+                                continue
+
+                            elif in_thinking and "</think>" in chunk_text:
+                                think_end_idx = chunk_text.find("</think>")
+                                thinking_content += chunk_text[:think_end_idx]
+                                thinking_message.content = thinking_content
+                                thinking_message.metadata["title"] = "Thought for"
+                                thinking_message.metadata["status"] = "done"
+                                thinking_message.metadata["duration"] = time.time() - thinking_start_time
+
+                                remaining_content = chunk_text[think_end_idx + len("</think>"):]
+                                if remaining_content.strip():
+                                    final_content += remaining_content
+                                    chat_message_accumulator.content = final_content
+
+                                yield [thinking_message, chat_message_accumulator]
+                                in_thinking = False
+                                continue
+
+                            elif not in_thinking:
+                                if "<think>" in chunk_text and "</think>" in chunk_text:
+                                    think_match = re.search(r'<think>(.*?)</think>', chunk_text, re.DOTALL)
+                                    if think_match:
+                                        thinking_start_time = time.time()
+                                        extracted_thinking = think_match.group(1)
+                                        thinking_message = ChatMessage(
+                                            role="assistant",
+                                            content=extracted_thinking,
+                                            metadata={
+                                                "title": "Thought for",
+                                                "id": 0,
+                                                "status": "done",
+                                                "duration": 0.1
+                                            }
+                                        )
+
+                                        before_think = chunk_text[:chunk_text.find("<think>")]
+                                        after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
+                                        final_content += before_think + after_think
+                                        chat_message_accumulator.content = final_content
+
+                                        yield [thinking_message, chat_message_accumulator]
+                                        continue
+                                else:
+                                    final_content += chunk_text
+                                    chat_message_accumulator.content = final_content
+                                    if thinking_message and thinking_message.metadata.get("status") == "done":
+                                        yield [thinking_message, chat_message_accumulator]
+                                    else:
+                                        yield chat_message_accumulator
             else:
                 if response_stream.choices:
                     full_content = response_stream.choices[0].message.content
-                    chat_message_accumulator.content = full_content
-                    yield chat_message_accumulator
+
+                    think_match = re.search(r'<think>(.*?)</think>', full_content, re.DOTALL)
+                    if think_match:
+                        thinking_content = think_match.group(1)
+                        thinking_message = ChatMessage(
+                            role="assistant",
+                            content=thinking_content,
+                            metadata={
+                                "title": "Thought for",
+                                "id": 0,
+                                "status": "done",
+                                "duration": 0.1
+                            }
+                        )
+
+                        final_content = re.sub(r'<think>.*?</think>', '', full_content, flags=re.DOTALL).strip()
+                        chat_message_accumulator.content = final_content
+
+                        yield [thinking_message, chat_message_accumulator]
+                    else:
+                        chat_message_accumulator.content = full_content
+                        yield chat_message_accumulator
                 else:
                     logger.error("OpenAI non-stream response had no choices.")
                     yield ChatMessage(role="assistant", content="Error: No response from model.")
@@ -433,6 +530,12 @@ def handle_chat(message: Dict,
             response_stream = model.generate_response(**response_args)
 
             chat_message_accumulator = ChatMessage(role="assistant", content="")
+            thinking_message = None
+            thinking_content = ""
+            final_content = ""
+            in_thinking = False
+            thinking_start_time = None
+
             for chunk in response_stream:
                 chunk_text = ""
                 if isinstance(chunk, str):
@@ -448,18 +551,93 @@ def handle_chat(message: Dict,
                     if stream and eos_token and eos_token in chunk_text:
                         if chunk_text == eos_token:
                             break
-                        if eos_token and eos_token in chunk_text:
-                            chunk_text = chunk_text.split(eos_token)[0]
+                        chunk_text = chunk_text.split(eos_token)[0]
 
-                        chat_message_accumulator.content += chunk_text
-                        if eos_token and eos_token in chunk_text:
-                            break
-                    elif not (stream and eos_token and eos_token in chunk_text):
-                        chat_message_accumulator.content += chunk_text
-                    if stream:
-                        yield chat_message_accumulator
+                    if "<think>" in chunk_text and not in_thinking:
+                        in_thinking = True
+                        thinking_start_time = time.time()
+                        thinking_message = ChatMessage(
+                            role="assistant",
+                            content="",
+                            metadata={"title": "Thinking", "id": 0, "status": "pending"}
+                        )
+                        think_start_idx = chunk_text.find("<think>") + len("<think>")
+                        if think_start_idx < len(chunk_text):
+                            thinking_content += chunk_text[think_start_idx:]
+                            thinking_message.content = thinking_content
+                        if stream:
+                            yield thinking_message
+                        continue
+
+                    elif in_thinking and "</think>" not in chunk_text:
+                        thinking_content += chunk_text
+                        thinking_message.content = thinking_content
+                        if stream:
+                            yield thinking_message
+                        continue
+
+                    elif in_thinking and "</think>" in chunk_text:
+                        think_end_idx = chunk_text.find("</think>")
+                        thinking_content += chunk_text[:think_end_idx]
+                        thinking_message.content = thinking_content
+                        thinking_message.metadata['title'] = "Thought for"
+                        thinking_message.metadata["status"] = "done"
+                        thinking_message.metadata["duration"] = time.time() - thinking_start_time
+
+                        remaining_content = chunk_text[think_end_idx + len("</think>"):]
+                        if remaining_content.strip():
+                            final_content += remaining_content
+                            chat_message_accumulator.content = final_content
+
+                        if stream:
+                            yield [thinking_message, chat_message_accumulator]
+                        in_thinking = False
+                        continue
+
+                    elif not in_thinking:
+                        if "<think>" in chunk_text and "</think>" in chunk_text:
+                            think_match = re.search(r'<think>(.*?)</think>', chunk_text, re.DOTALL)
+                            if think_match:
+                                thinking_start_time = time.time()
+                                extracted_thinking = think_match.group(1)
+                                thinking_message = ChatMessage(
+                                    role="assistant",
+                                    content=extracted_thinking,
+                                    metadata={
+                                        "title": "Thought for",
+                                        "id": 0,
+                                        "status": "done",
+                                        "duration": 0.1
+                                    }
+                                )
+
+                                before_think = chunk_text[:chunk_text.find("<think>")]
+                                after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
+                                final_content += before_think + after_think
+                                chat_message_accumulator.content = final_content
+
+                                if stream:
+                                    yield [thinking_message, chat_message_accumulator]
+                                continue
+                        else:
+                            final_content += chunk_text
+                            chat_message_accumulator.content = final_content
+                            if thinking_message and thinking_message.metadata.get("status") == "done":
+                                if stream:
+                                    yield [thinking_message, chat_message_accumulator]
+                            else:
+                                if stream:
+                                    yield chat_message_accumulator
+
+                    if stream and eos_token and eos_token in chunk_text:
+                        break
+
             if not stream:
-                yield chat_message_accumulator
+                if thinking_message and thinking_message.metadata.get("status") == "done":
+                    yield [thinking_message, chat_message_accumulator]
+                else:
+                    yield chat_message_accumulator
+
     except Exception as e:
         logger.exception("Error in handle_chat:")
         raise gr.Error(str(e))
