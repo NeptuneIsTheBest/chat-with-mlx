@@ -98,9 +98,6 @@ class VisionModel:
             raise RuntimeError("Failed to load {}: {}".format(self.model_path, e))
 
     def generate_completion(self, prompt: str, images: List[str], stream: bool = False, temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512, repetition_penalty: float = 1.0):
-        if not images or len(images) == 0:
-            raise RuntimeError("Text only chat is not supported.")
-
         try:
             if stream:
                 return self._stream_generate(prompt=prompt, images=images, temperature=temperature, top_p=top_p, max_tokens=max_tokens, repetition_penalty=repetition_penalty)
@@ -110,9 +107,6 @@ class VisionModel:
             raise e
 
     def generate_response(self, message: str, images: List[str], history: Union[str, List[Dict]], stream: bool = False, temperature: float = 0.7, top_p: float = 0.9, max_tokens: int = 512, repetition_penalty: float = 1.0):
-        if not images or len(images) == 0:
-            raise RuntimeError("Text only chat is not supported.")
-
         message = [Message(MessageRole.USER, message).to_dict()]
 
         conversation = history + message
@@ -150,6 +144,11 @@ class OpenAIModel:
         self.client = OpenAI(api_key=api_key, base_url=base_url)
 
         self.model_name = model_name
+
+        try:
+            self.client.models.retrieve(self.model_name)
+        except Exception as e:
+            raise RuntimeError("Failed to load {}: {}".format(self.model_name, e))
 
     def generate_response(self, messages: List, reasoning_effort: str = None, stream: bool = False, **kwargs):
         return self.client.chat.completions.create(model=self.model_name, messages=messages, reasoning_effort=reasoning_effort, stream=stream, **kwargs)
