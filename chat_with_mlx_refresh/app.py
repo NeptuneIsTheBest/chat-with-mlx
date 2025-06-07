@@ -10,11 +10,12 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 
 import gradio as gr
+import mlx.core.metal
 from gradio.components.chatbot import ChatMessage
 
-from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock
+from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock, SystemStatusBlock
 from .language import get_text
-from .model import Message, MessageRole, ModelManager, Model, VisionModel, OpenAIModel
+from .model import Message, MessageRole, ModelManager, TextModel, VisionModel, OpenAIModel
 from .model_management import AddLocalModelBlock, AddAPIModelBlock
 
 logger = logging.getLogger(__name__)
@@ -22,11 +23,13 @@ logger.setLevel(logging.INFO)
 
 model_manager = ModelManager()
 
+chat_system_status_block = SystemStatusBlock(model_manager)
 chat_system_prompt_block = ChatSystemPromptBlock(model_manager=model_manager)
 chat_load_model_block = LoadModelBlock(model_manager=model_manager)
 chat_advanced_setting_block = AdvancedSettingBlock()
 chat_rag_setting_block = RAGSettingBlock()
 
+completion_system_status_block = SystemStatusBlock(model_manager=model_manager)
 completion_load_model_block = LoadModelBlock(model_manager=model_manager)
 
 completion_advanced_setting_block = AdvancedSettingBlock()
@@ -35,7 +38,7 @@ model_management_add_loacl_model_block = AddLocalModelBlock(model_manager=model_
 model_management_add_api_model_block = AddAPIModelBlock(model_manager=model_manager)
 
 
-def get_loaded_model() -> Union[Model, VisionModel]:
+def get_loaded_model() -> Union[TextModel, VisionModel, OpenAIModel]:
     model = model_manager.get_loaded_model()
     if model is None:
         raise RuntimeError("No model loaded.")
@@ -335,7 +338,7 @@ def build_openai_api_messages(current_message_dict: Dict, history_list: List[Dic
     return api_messages
 
 
-def prepare_generic_model_inputs(current_message_dict: Dict, history_list: List[Dict], system_prompt: Optional[str], model_instance: Union[Model, VisionModel]) -> Tuple[str, List[Dict], List[str]]:
+def prepare_generic_model_inputs(current_message_dict: Dict, history_list: List[Dict], system_prompt: Optional[str], model_instance: Union[TextModel, VisionModel]) -> Tuple[str, List[Dict], List[str]]:
     effective_history = []
     if system_prompt and system_prompt.strip() != "":
         effective_history.append(Message(MessageRole.SYSTEM, content=system_prompt).to_dict())
@@ -372,7 +375,9 @@ def handle_chat(message: Dict,
                 history: List[Dict],
                 system_prompt: str = None,
                 temperature: float = 0.7,
+                top_k: int = 20,
                 top_p: float = 0.9,
+                min_p: float = 0.0,
                 max_tokens: int = 512,
                 repetition_penalty: float = 1.0,
                 stream: bool = True):
@@ -509,7 +514,9 @@ def handle_chat(message: Dict,
             processed_message_text, processed_history_list, image_paths = prepare_generic_model_inputs(message, history, system_prompt, model)
 
             temperature = float(temperature)
+            top_k = int(top_k)
             top_p = float(top_p)
+            min_p = float(min_p)
             repetition_penalty = float(repetition_penalty)
 
             response_args = {
@@ -517,7 +524,9 @@ def handle_chat(message: Dict,
                 "history": processed_history_list,
                 "stream": stream,
                 "temperature": temperature,
+                "top_k": top_k,
                 "top_p": top_p,
+                "min_p": min_p,
                 "max_tokens": max_tokens,
                 "repetition_penalty": repetition_penalty,
             }
@@ -637,7 +646,6 @@ def handle_chat(message: Dict,
                     yield [thinking_message, chat_message_accumulator]
                 else:
                     yield chat_message_accumulator
-
     except Exception as e:
         logger.exception("Error in handle_chat:")
         raise gr.Error(str(e))
@@ -645,7 +653,9 @@ def handle_chat(message: Dict,
 
 def handle_completion(prompt: str,
                       temperature: float = 0.7,
+                      top_k: int = 20,
                       top_p: float = 0.9,
+                      min_p: float = 0.0,
                       max_tokens: int = 512,
                       repetition_penalty: float = 1.0,
                       stream: bool = True):
@@ -663,7 +673,9 @@ def handle_completion(prompt: str,
                 prompt=prompt,
                 stream=stream,
                 temperature=temperature,
+                top_k=top_k,
                 top_p=top_p,
+                min_p=min_p,
                 max_tokens=max_tokens,
                 repetition_penalty=repetition_penalty)
         else:
@@ -673,12 +685,27 @@ def handle_completion(prompt: str,
                     prompt=prompt,
                     stream=stream,
                     temperature=temperature,
+                    top_k=top_k,
                     top_p=top_p,
+                    min_p=min_p,
                     max_tokens=max_tokens,
                     repetition_penalty=repetition_penalty):
-                if eos_token not in chunk.text:
-                    response += chunk.text
+                chunk_text = ""
+                if isinstance(chunk, str):
+                    chunk_text = chunk
+                elif hasattr(chunk, "text"):
+                    chunk_text = chunk.text
+                elif hasattr(chunk, "choices") and chunk.choices and hasattr(chunk.choices[0], "delta") and chunk.choices[0].delta.content:
+                    chunk_text = chunk.choices[0].delta.content
+                else:
+                    logger.warning(f"Unexpected chunk type from model: {type(chunk)}")
+                if eos_token not in chunk_text:
+                    response += chunk_text
                     yield response
+                else:
+                    yield response
+                    break
+            return None
     except Exception as e:
         raise gr.Error(str(e))
 
@@ -773,12 +800,38 @@ def update_model_max_length(slider_value: Union[int, float]):
         return gr.update()
 
 
+def bytes_to_gigabytes(value):
+    return value / 1024 ** 3
+
+
+def update_memory_usage() -> str:
+    memory_usage_bytes = model_manager.get_system_memory_usage()
+    total_memory_bytes = mlx.core.metal.device_info()["memory_size"]
+
+    memory_usage_gb = bytes_to_gigabytes(memory_usage_bytes) if isinstance(memory_usage_bytes, (int, float)) else "N/A"
+    total_memory_gb = bytes_to_gigabytes(total_memory_bytes) if isinstance(total_memory_bytes, (int, float)) else "N/A"
+
+    return "{:.2f} GB | {:.2f} GB".format(memory_usage_gb, total_memory_gb)
+
+
 with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
+    timer = gr.Timer(value=1, active=True)
+    timer.tick(
+        fn=lambda: update_memory_usage(),
+        outputs=[chat_system_status_block.memory_usage_textbox]
+    ).then(
+        fn=lambda: update_memory_usage(),
+        outputs=[completion_system_status_block.memory_usage_textbox]
+    )
+
     gr.HTML("<h1>Chat with MLX</h1>")
 
     with gr.Tab(get_text("Tab.chat")):
         with gr.Row():
             with gr.Column(scale=2):
+                with gr.Row():
+                    chat_system_status_block.render_all()
+
                 with gr.Row():
                     gr.Markdown(f"## {get_text('Page.Chat.Markdown.configuration')}")
 
@@ -854,7 +907,9 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     additional_inputs=[
                         chat_system_prompt_block.system_prompt_textbox,
                         chat_advanced_setting_block.temperature_slider,
+                        chat_advanced_setting_block.top_k_slider,
                         chat_advanced_setting_block.top_p_slider,
+                        chat_advanced_setting_block.min_p_slider,
                         chat_advanced_setting_block.max_tokens_slider,
                         chat_advanced_setting_block.repetition_penalty_slider
                     ]
@@ -863,6 +918,8 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     with gr.Tab(get_text("Tab.completion"), interactive=True):
         with gr.Row():
             with gr.Column(scale=2):
+                completion_system_status_block.render_all()
+
                 gr.Markdown(f"## {get_text('Page.Chat.Markdown.configuration')}")
 
                 completion_load_model_block.render_all()
@@ -904,7 +961,9 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     inputs=[
                         gr.Textbox(lines=10, show_copy_button=True, render=True, label=get_text("Page.Completion.Textbox.prompt.label")),
                         completion_advanced_setting_block.temperature_slider,
+                        completion_advanced_setting_block.top_k_slider,
                         completion_advanced_setting_block.top_p_slider,
+                        completion_advanced_setting_block.min_p_slider,
                         completion_advanced_setting_block.max_tokens_slider,
                         completion_advanced_setting_block.repetition_penalty_slider
                     ],
@@ -1011,6 +1070,12 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         fn=update_model_max_length,
         inputs=[completion_advanced_setting_block.max_tokens_slider],
         outputs=[completion_advanced_setting_block.max_tokens_slider]
+    ).then(
+        fn=lambda: update_memory_usage(),
+        outputs=[chat_system_status_block.memory_usage_textbox]
+    ).then(
+        fn=lambda: update_memory_usage(),
+        outputs=[completion_system_status_block.memory_usage_textbox]
     )
 
 

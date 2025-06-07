@@ -5,12 +5,22 @@ MULTI_LANGUAGE = {
         "Tab": {
             "chat": "Chat",
             "completion": "Completion",
-            "model_management": "Model Management",
+            "model_management": "Model Management"
         },
         "Page": {
             "Chat": {
                 "Markdown": {
                     "configuration": "Configuration",
+                },
+                "SystemStatusBlock": {
+                    "Textbox": {
+                        "device_name": {
+                            "label": "Device Name"
+                        },
+                        "memory_usage": {
+                            "label": "Memory Usage"
+                        }
+                    }
                 },
                 "ChatSystemPromptBlock": {
                     "Textbox": {
@@ -28,13 +38,13 @@ MULTI_LANGUAGE = {
                 "LoadModelBlock": {
                     "Dropdown": {
                         "model_selector": {
-                            "label": "Select Model",
+                            "label": "Select Model"
                         }
                     },
                     "Textbox": {
                         "model_status": {
                             "not_loaded_value": "No model loaded.",
-                            "loaded_value": "{} model is loaded.",
+                            "loaded_value": "{} model is loaded."
                         }
                     },
                     "Button": {
@@ -50,8 +60,14 @@ MULTI_LANGUAGE = {
                             "temperature": {
                                 "label": "Temperature"
                             },
+                            "top_k": {
+                                "label": "Top K"
+                            },
                             "top_p": {
                                 "label": "Top P"
+                            },
+                            "min_p": {
+                                "label": "Min P"
                             },
                             "max_tokens": {
                                 "label": "Max Tokens"
@@ -74,7 +90,7 @@ MULTI_LANGUAGE = {
             },
             "Completion": {
                 "Markdown": {
-                    "configuration": "Configuration",
+                    "configuration": "Configuration"
                 },
                 "Button": {
                     "submit": {
@@ -118,7 +134,7 @@ MULTI_LANGUAGE = {
                             "placeholder": "The MLX community Repository. It should look like mlx-community/Phi-3.5-vision-instruct-8bit."
                         },
                         "default_system_prompt": {
-                            "label": "Default System Prompt",
+                            "label": "Default System Prompt"
                         }
                     },
                     "Dropdown": {
