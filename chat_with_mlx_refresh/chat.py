@@ -35,6 +35,27 @@ class ChatSystemPromptBlock(ComponentsBlock):
             gr.Error(str(e))
 
 
+class SystemStatusBlock(ComponentsBlock):
+    def __init__(self, model_manager: ModelManager):
+        self.model_manager = model_manager
+
+        self.device_name_textbox = gr.Textbox(
+            label=get_text("Page.Chat.SystemStatusBlock.Textbox.device_name.label"),
+            value=lambda: self.model_manager.get_device_info()["device_name"],
+            interactive=False,
+            render=False
+        )
+        self.memory_usage_textbox = gr.Textbox(
+            label=get_text("Page.Chat.SystemStatusBlock.Textbox.memory_usage.label"),
+            interactive=False,
+            render=False
+        )
+
+    def render_all(self):
+        self.device_name_textbox.render()
+        self.memory_usage_textbox.render()
+
+
 class LoadModelBlock(ComponentsBlock):
     def __init__(self, model_manager: ModelManager):
         self.model_manager = model_manager
@@ -49,7 +70,7 @@ class LoadModelBlock(ComponentsBlock):
             value=self.get_load_model_status,
             show_label=False,
             render=False,
-            interactive=False,
+            interactive=False
         )
         self.load_model_button = gr.Button(
             value=get_text("Page.Chat.LoadModelBlock.Button.load_model.value"),
@@ -80,8 +101,16 @@ class AdvancedSettingBlock(ComponentsBlock):
         self.temperature_slider = gr.Slider(
             minimum=0.0,
             maximum=2.0,
-            value=0.5,
+            value=0.6,
             label=get_text("Page.Chat.Accordion.AdvancedSetting.Slider.temperature.label"),
+            render=False,
+            interactive=True
+        )
+        self.top_k_slider = gr.Slider(
+            minimum=0,
+            maximum=100,
+            value=20,
+            label=get_text("Page.Chat.Accordion.AdvancedSetting.Slider.top_k.label"),
             render=False,
             interactive=True
         )
@@ -90,6 +119,14 @@ class AdvancedSettingBlock(ComponentsBlock):
             maximum=1.0,
             value=0.95,
             label=get_text("Page.Chat.Accordion.AdvancedSetting.Slider.top_p.label"),
+            render=False,
+            interactive=True
+        )
+        self.min_p_slider = gr.Slider(
+            minimum=0.0,
+            maximum=1.0,
+            value=0.0,
+            label=get_text("Page.Chat.Accordion.AdvancedSetting.Slider.min_p.label"),
             render=False,
             interactive=True
         )
@@ -104,7 +141,7 @@ class AdvancedSettingBlock(ComponentsBlock):
         self.repetition_penalty_slider = gr.Slider(
             minimum=0.0,
             maximum=2.0,
-            value=1.2,
+            value=1.0,
             label=get_text("Page.Chat.Accordion.AdvancedSetting.Slider.repetition_penalty.label"),
             render=False,
             interactive=True
@@ -112,7 +149,9 @@ class AdvancedSettingBlock(ComponentsBlock):
 
     def render_all(self):
         self.temperature_slider.render()
+        self.top_k_slider.render()
         self.top_p_slider.render()
+        self.min_p_slider.render()
         self.max_tokens_slider.render()
         self.repetition_penalty_slider.render()
 
