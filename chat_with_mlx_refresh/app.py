@@ -381,6 +381,30 @@ def handle_chat(message: Dict,
                 max_tokens: int = 512,
                 repetition_penalty: float = 1.0,
                 stream: bool = True):
+    CHATML_CONTROL_TOKENS = [
+        '<|im_start|>', '<|im_end|>',
+        '<|system|>', '<|user|>', '<|assistant|>',
+        '<|end|>', '<|endoftext|>'
+    ]
+
+    CHATML_STOP_TOKENS = ['<|im_end|>', '<|end|>', '<|endoftext|>']
+
+    def filter_chatml_tokens(text: str) -> tuple[str, bool]:
+        should_stop = False
+        filtered_text = text
+
+        for stop_token in CHATML_STOP_TOKENS:
+            if stop_token in text:
+                should_stop = True
+                stop_index = text.find(stop_token)
+                filtered_text = text[:stop_index]
+                break
+
+        for token in CHATML_CONTROL_TOKENS:
+            filtered_text = filtered_text.replace(token, '')
+
+        return filtered_text, should_stop
+
     try:
         model = get_loaded_model()
 
@@ -395,13 +419,43 @@ def handle_chat(message: Dict,
             final_content = ""
             in_thinking = False
             thinking_start_time = None
+            chunk_buffer = ""
 
             if stream:
                 for chunk in response_stream:
                     if chunk.choices:
                         delta = chunk.choices[0].delta
                         if delta.content:
-                            chunk_text = delta.content
+                            chunk_text = chunk_buffer + delta.content
+                            chunk_buffer = ""
+
+                            for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think"]:
+                                if chunk_text.endswith(partial):
+                                    chunk_buffer = partial
+                                    chunk_text = chunk_text[:-len(partial)]
+                                    break
+
+                            if not chunk_text:
+                                continue
+
+                            chunk_text, should_stop = filter_chatml_tokens(chunk_text)
+
+                            if should_stop:
+                                if in_thinking:
+                                    thinking_content += chunk_text
+                                    thinking_message.content = thinking_content
+                                    thinking_message.metadata["title"] = "Thought for"
+                                    thinking_message.metadata["status"] = "done"
+                                    thinking_message.metadata["duration"] = time.time() - thinking_start_time
+                                    yield [thinking_message, chat_message_accumulator]
+                                else:
+                                    final_content += chunk_text
+                                    chat_message_accumulator.content = final_content
+                                    if thinking_message and thinking_message.metadata.get("status") == "done":
+                                        yield [thinking_message, chat_message_accumulator]
+                                    else:
+                                        yield chat_message_accumulator
+                                break
 
                             if "<think>" in chunk_text and not in_thinking:
                                 in_thinking = True
@@ -476,6 +530,8 @@ def handle_chat(message: Dict,
                 if response_stream.choices:
                     full_content = response_stream.choices[0].message.content
 
+                    full_content, _ = filter_chatml_tokens(full_content)
+
                     think_match = re.search(r'<think>(.*?)</think>', full_content, re.DOTALL)
                     if think_match:
                         thinking_content = think_match.group(1)
@@ -544,6 +600,7 @@ def handle_chat(message: Dict,
             final_content = ""
             in_thinking = False
             thinking_start_time = None
+            chunk_buffer = ""
 
             for chunk in response_stream:
                 chunk_text = ""
@@ -561,6 +618,40 @@ def handle_chat(message: Dict,
                         if chunk_text == eos_token:
                             break
                         chunk_text = chunk_text.split(eos_token)[0]
+
+                    chunk_text = chunk_buffer + chunk_text
+                    chunk_buffer = ""
+
+                    for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think"]:
+                        if chunk_text.endswith(partial):
+                            chunk_buffer = partial
+                            chunk_text = chunk_text[:-len(partial)]
+                            break
+
+                    if not chunk_text:
+                        continue
+
+                    chunk_text, should_stop = filter_chatml_tokens(chunk_text)
+
+                    if should_stop:
+                        if in_thinking:
+                            thinking_content += chunk_text
+                            thinking_message.content = thinking_content
+                            thinking_message.metadata["title"] = "Thought for"
+                            thinking_message.metadata["status"] = "done"
+                            thinking_message.metadata["duration"] = time.time() - thinking_start_time
+                            if stream:
+                                yield [thinking_message, chat_message_accumulator]
+                        else:
+                            final_content += chunk_text
+                            chat_message_accumulator.content = final_content
+                            if thinking_message and thinking_message.metadata.get("status") == "done":
+                                if stream:
+                                    yield [thinking_message, chat_message_accumulator]
+                            else:
+                                if stream:
+                                    yield chat_message_accumulator
+                        break
 
                     if "<think>" in chunk_text and not in_thinking:
                         in_thinking = True
@@ -885,15 +976,32 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     show_copy_button=True,
                     render=False,
                     latex_delimiters=[
-                        {"left": "$$", "right": "$$", "display": True},
-                        {"left": "$", "right": "$", "display": False},
-                        {"left": "\\(", "right": "\\)", "display": False},
                         {"left": "\\begin{equation}", "right": "\\end{equation}", "display": True},
+                        {"left": "\\begin{equation*}", "right": "\\end{equation*}", "display": True},
                         {"left": "\\begin{align}", "right": "\\end{align}", "display": True},
+                        {"left": "\\begin{align*}", "right": "\\end{align*}", "display": True},
                         {"left": "\\begin{alignat}", "right": "\\end{alignat}", "display": True},
+                        {"left": "\\begin{alignat*}", "right": "\\end{alignat*}", "display": True},
                         {"left": "\\begin{gather}", "right": "\\end{gather}", "display": True},
+                        {"left": "\\begin{gather*}", "right": "\\end{gather*}", "display": True},
+                        {"left": "\\begin{eqnarray}", "right": "\\end{eqnarray}", "display": True},
+                        {"left": "\\begin{eqnarray*}", "right": "\\end{eqnarray*}", "display": True},
+                        {"left": "\\begin{multline}", "right": "\\end{multline}", "display": True},
+                        {"left": "\\begin{multline*}", "right": "\\end{multline*}", "display": True},
+                        {"left": "\\begin{split}", "right": "\\end{split}", "display": True},
+                        {"left": "\\begin{cases}", "right": "\\end{cases}", "display": True},
+                        {"left": "\\begin{matrix}", "right": "\\end{matrix}", "display": True},
+                        {"left": "\\begin{pmatrix}", "right": "\\end{pmatrix}", "display": True},
+                        {"left": "\\begin{bmatrix}", "right": "\\end{bmatrix}", "display": True},
+                        {"left": "\\begin{vmatrix}", "right": "\\end{vmatrix}", "display": True},
+                        {"left": "\\begin{Vmatrix}", "right": "\\end{Vmatrix}", "display": True},
                         {"left": "\\begin{CD}", "right": "\\end{CD}", "display": True},
-                        {"left": "\\[", "right": "\\]", "display": True}
+
+                        {"left": "\\[", "right": "\\]", "display": True},
+                        {"left": "$$", "right": "$$", "display": True},
+
+                        {"left": "\\(", "right": "\\)", "display": False},
+                        {"left": "$", "right": "$", "display": False}
                     ]
                 )
 
