@@ -346,6 +346,13 @@ def prepare_generic_model_inputs(current_message_dict: Dict, history_list: List[
         effective_history.append(Message(MessageRole.SYSTEM, content=system_prompt).to_dict())
     effective_history.extend(history_list)
 
+    effective_history = [
+        history_item for history_item in effective_history
+        if not (isinstance(history_item, dict) and
+                isinstance(history_item.get("metadata"), dict) and
+                history_item["metadata"].get("title") in ["Thought for", "Thinking"])
+    ]
+
     image_paths = []
     if isinstance(model_instance, VisionModel):
         for hist_item in effective_history:
