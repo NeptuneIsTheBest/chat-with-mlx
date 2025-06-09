@@ -5,6 +5,7 @@ import copy
 import hashlib
 import logging
 import re
+import threading
 import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
@@ -22,6 +23,7 @@ logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 model_manager = ModelManager()
+generation_stop_event = threading.Event()
 
 chat_system_status_block = SystemStatusBlock(model_manager)
 chat_system_prompt_block = ChatSystemPromptBlock(model_manager=model_manager)
@@ -423,6 +425,8 @@ def handle_chat(message: Dict,
 
             if stream:
                 for chunk in response_stream:
+                    if generation_stop_event.is_set():
+                        break
                     if chunk.choices:
                         delta = chunk.choices[0].delta
                         if delta.content:
@@ -603,6 +607,8 @@ def handle_chat(message: Dict,
             chunk_buffer = ""
 
             for chunk in response_stream:
+                if generation_stop_event.is_set():
+                    break
                 chunk_text = ""
                 if isinstance(chunk, str):
                     chunk_text = chunk
@@ -740,6 +746,43 @@ def handle_chat(message: Dict,
     except Exception as e:
         logger.exception("Error in handle_chat:")
         raise gr.Error(str(e))
+    finally:
+        del model
+
+
+def managed_chat_generator(
+        message: Dict,
+        history: List[Dict],
+        system_prompt: str = None,
+        temperature: float = 0.7,
+        top_k: int = 20,
+        top_p: float = 0.9,
+        min_p: float = 0.0,
+        max_tokens: int = 512,
+        repetition_penalty: float = 1.0,
+        stream: bool = True):
+    g = handle_chat(
+        message=message,
+        history=history,
+        system_prompt=system_prompt,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        min_p=min_p,
+        max_tokens=max_tokens,
+        repetition_penalty=repetition_penalty,
+        stream=stream
+    )
+
+    generation_stop_event.clear()
+    model_manager.close_active_generator()
+    model_manager.set_active_generator(g)
+
+    try:
+        yield from g
+    finally:
+        logging.info("Managed generator wrapper is finishing. Clearing active generator.")
+        model_manager.close_active_generator()
 
 
 def handle_completion(prompt: str,
@@ -781,6 +824,8 @@ def handle_completion(prompt: str,
                     min_p=min_p,
                     max_tokens=max_tokens,
                     repetition_penalty=repetition_penalty):
+                if generation_stop_event.is_set():
+                    break
                 chunk_text = ""
                 if isinstance(chunk, str):
                     chunk_text = chunk
@@ -799,6 +844,38 @@ def handle_completion(prompt: str,
             return None
     except Exception as e:
         raise gr.Error(str(e))
+    finally:
+        del model
+
+
+def managed_completion_generator(prompt: str,
+                                 temperature: float = 0.7,
+                                 top_k: int = 20,
+                                 top_p: float = 0.9,
+                                 min_p: float = 0.0,
+                                 max_tokens: int = 512,
+                                 repetition_penalty: float = 1.0,
+                                 stream: bool = True):
+    g = handle_completion(
+        prompt=prompt,
+        temperature=temperature,
+        top_k=top_k,
+        top_p=top_p,
+        min_p=min_p,
+        max_tokens=max_tokens,
+        repetition_penalty=repetition_penalty,
+        stream=stream
+    )
+
+    generation_stop_event.clear()
+    model_manager.close_active_generator()
+    model_manager.set_active_generator(g)
+
+    try:
+        yield from g
+    finally:
+        logging.info("Managed completion generator wrapper is finishing.")
+        model_manager.close_active_generator()
 
 
 def get_load_model_status():
@@ -816,11 +893,17 @@ def load_model(model_name: str) -> Tuple[str, str]:
         raise gr.Error(str(e))
 
 
+def stop_generation() -> None:
+    generation_stop_event.set()
+
+
 def chat_load_model_callback(model_name: str):
+    stop_generation()
     return load_model(model_name)
 
 
 def completion_load_model_callback(model_name: str):
+    stop_generation()
     return load_model(model_name)[0]
 
 
@@ -875,20 +958,25 @@ def update_slider_config(slider_new_min: Union[int, float], slider_new_max: Unio
 
 
 def update_model_max_length(slider_value: Union[int, float]):
-    model = model_manager.get_loaded_model()
-    if model is not None:
-        if isinstance(model, OpenAIModel):
-            return update_slider_config(1, 1048576, slider_value)
-        try:
-            model_max_length = model.tokenizer.model_max_length
-            if model_max_length is None or model_max_length <= 0:
+    try:
+        model = get_loaded_model()
+        if model is not None:
+            if isinstance(model, OpenAIModel):
+                return update_slider_config(1, 1048576, slider_value)
+            try:
+                model_max_length = model.tokenizer.model_max_length
+                if model_max_length is None or model_max_length <= 0:
+                    model_max_length = 32768
+            except Exception as e:
                 model_max_length = 32768
-        except Exception as e:
-            model_max_length = 32768
-            logger.error("Error while updating model max length.")
-        return update_slider_config(1, model_max_length, slider_value)
-    else:
+                logger.error("Error while updating model max length.")
+            return update_slider_config(1, model_max_length, slider_value)
+        else:
+            return gr.update()
+    except RuntimeError:
         return gr.update()
+    except Exception as e:
+        raise gr.Error(str(e))
 
 
 def bytes_to_gigabytes(value):
@@ -906,8 +994,8 @@ def update_memory_usage() -> str:
 
 
 with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
-    timer = gr.Timer(value=1, active=True)
-    timer.tick(
+    update_memory_usage_timer = gr.Timer(value=1, active=True)
+    update_memory_usage_timer.tick(
         fn=lambda: update_memory_usage(),
         outputs=[chat_system_status_block.memory_usage_textbox]
     ).then(
@@ -1009,7 +1097,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     multimodal=True,
                     chatbot=chatbot,
                     type="messages",
-                    fn=handle_chat,
+                    fn=managed_chat_generator,
                     title=None,
                     autofocus=False,
                     additional_inputs=[
@@ -1065,7 +1153,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 completion_interface = gr.Interface(
                     clear_btn=None,
                     flagging_mode="never",
-                    fn=handle_completion,
+                    fn=managed_completion_generator,
                     inputs=[
                         gr.Textbox(lines=10, show_copy_button=True, render=True, label=get_text("Page.Completion.Textbox.prompt.label")),
                         completion_advanced_setting_block.temperature_slider,
@@ -1188,8 +1276,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
 
 
 def exit_handler():
-    if model_manager.get_loaded_model():
-        model_manager.close_model()
+    model_manager.close_model()
 
 
 atexit.register(exit_handler)
