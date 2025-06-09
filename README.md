@@ -1,9 +1,17 @@
 # Chat with MLX
 
-> [!Warning]
-> The project is currently under active development, please update frequently using the following commands: `pip install -U git+https://github.com/NeptuneIsTheBest/chat-with-mlx.git`
+![MLX Chat UI](https://img.shields.io/badge/Apple%20Silicon-MLX-blue?style=for-the-badge&logo=apple)
+![License](https://img.shields.io/badge/License-MIT-green?style=for-the-badge)
+![Python](https://img.shields.io/badge/Python-3.10+-blue?style=for-the-badge&logo=python)
+![Platform](https://img.shields.io/badge/Platform-macOS%2013.5+-lightgrey?style=for-the-badge&logo=apple)
 
-**Run LLM on your Mac!** An all-in-one chat Web UI based on the MLX framework, designed for Apple Silicon.
+> [!IMPORTANT]
+> **Active Development Notice**: This project is under active development. Stay updated with the latest features:
+> ```bash
+> pip install -U git+https://github.com/NeptuneIsTheBest/chat-with-mlx.git
+> ```
+
+**Run LLM on your Mac!** An all-in-one LLMs chat Web UI based on the MLX framework, designed for Apple Silicon.
 
 The idea of chat-with-mlx comes from [qnguyen3/chat-with-mlx](https://github.com/qnguyen3/chat-with-mlx).
 
@@ -11,19 +19,36 @@ chat-with-mlx provides a similar and more modern experience, and offers more fea
 
 You can **upload files**, or even **images** to chat when using the vision model.
 
+You can also use the **reasoning model** and see the model's reasoning process.
+
+Also supports online LLM using OpenAI API compatible
+
 If this helps you, I'd be happy if you could give me a star, thank you. ✨
 
-## TL;DR
+## Quick Start
 
-Use the following commands to install and run:
+Get up and running in 30 seconds:
 
 ```bash
+# Create virtual environment
 python -m venv chat-with-mlx
 cd chat-with-mlx
-. ./bin/activate
+source bin/activate
+
+# Install and run
 pip install git+https://github.com/NeptuneIsTheBest/chat-with-mlx.git
 chat-with-mlx
 ```
+
+That's it! Open http://127.0.0.1:7860 in your browser and start chatting! 🎉
+
+## Model Support
+
+* Qwen3
+* Phi-4-reasoning
+* DeepSeek-R1-0528
+* Gemma3
+* and so on...
 
 ## Roadmap
 
@@ -36,8 +61,9 @@ chat-with-mlx
 
 ### Others
 
-* [x] Upload file to chat（support `PDF, Word, Excel, PPT` and some plain text file like `.txt, .csv, .md`.）
-* [x] Upload picture to chat (Currently tested on the `Phi-3.5-vision-instruct` model)
+* [x] Upload file to chat（Support `PDF, Word, Excel, PPT` and some plain text file like `.txt, .csv, .md`）
+* [x] Upload picture to chat (Tested on the `Phi-3.5-vision-instruct` and `Qwen2.5-VL-7B-Instruct`)
+* [x] See the model's reasoning process (Tested on `Qwen3` and `Phi-4-reasoning`)
 * [ ] and so on...
 
 ## How to use
