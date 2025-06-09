@@ -2,11 +2,10 @@ import enum
 import gc
 import json
 import logging
-import weakref
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Union, List, Optional, Generator, Any
+from typing import Dict, Union, List, Optional, Generator, Any, Tuple
 
 import mlx
 import mlx_vlm
@@ -217,24 +216,32 @@ class MemoryUsageLevel(enum.Enum):
 
 
 class ModelManager:
-    VALID_QUANTIZE_TYPES = {"None", "4bit", "8bit", "bf16", "bf32"}
-    VALID_LANGUAGES = {"multi"}
-    VALID_MULTIMODAL_ABILITIES = {"None", "vision"}
+    VALID_QUANTIZE_TYPES = frozenset({"None", "4bit", "8bit", "bf16", "bf32"})
+    VALID_LANGUAGES = frozenset({"multi"})
+    VALID_MULTIMODAL_ABILITIES = frozenset({"None", "vision"})
     CONFIG_EXTENSION = ".json"
 
-    def __init__(self, base_dir: Optional[str] = None):
+    STRICT_MEMORY_RATIO = 0.7
+    STRICT_CACHE_RATIO = 0.3
+    HIGH_WIRED_MULTIPLIER = 0.5
+    HIGH_MEMORY_RATIO = 0.8
+    HIGH_CACHE_RATIO = 0.6
+
+    def __init__(self, base_dir: Optional[str] = None) -> None:
         self.base_dir = Path(base_dir) if base_dir else Path(__file__).parent / "models"
         self.configs_dir = self.base_dir / "configs"
         self.models_dir = self.base_dir / "models"
 
         self._setup_directories()
 
-        self.model: Optional[BaseLocalModel, OpenAIModel] = None
+        self.model: Optional[Union['BaseLocalModel', 'OpenAIModel']] = None
         self.model_config: Optional[Dict[str, Union[str, List[str]]]] = None
         self.model_configs: Dict[str, Dict[str, Union[str, List[str]]]] = self.scan_models()
 
-        self.memory_usage_level: Optional[MemoryUsageLevel] = MemoryUsageLevel.STRICT
+        self.memory_usage_level = MemoryUsageLevel.STRICT
         self.set_memory_usage_level(self.memory_usage_level)
+
+        self.active_generator = []
 
     def _setup_directories(self) -> None:
         directories = [self.base_dir, self.configs_dir, self.models_dir]
@@ -242,29 +249,35 @@ class ModelManager:
         for directory in directories:
             directory.mkdir(parents=True, exist_ok=True)
 
-        if not all(d.is_dir() for d in directories):
-            raise IOError("Failed to create the required directory structure.")
+        missing_dirs = [d for d in directories if not d.is_dir()]
+        if missing_dirs:
+            raise IOError(f"Failed to create directories: {missing_dirs}")
 
-    def _validate_repo_format(self, repo: str, name: str) -> None:
-        if len(repo.strip().split("/")) != 2:
-            raise ValueError(f"'{name}' must be in 'owner/repo' format.")
+    @staticmethod
+    def _validate_repo_format(repo: str, name: str) -> None:
+        repo = repo.strip()
+        if len(repo.split("/")) != 2 or not all(repo.split("/")):
+            raise ValueError(f"'{name}' must be in 'owner/repo' format, got: '{repo}'")
 
     def _validate_quantize(self, quantize: str) -> None:
         if quantize not in self.VALID_QUANTIZE_TYPES:
-            raise ValueError(f"quantize must be one of {self.VALID_QUANTIZE_TYPES}.")
+            raise ValueError(f"quantize must be one of {self.VALID_QUANTIZE_TYPES}, got: '{quantize}'")
 
     def _validate_multimodal_ability(self, abilities: Optional[List[str]]) -> None:
         if not abilities:
             return
 
-        if "None" in abilities and len(abilities) > 1:
-            raise ValueError("'None' cannot exist with other abilities.")
+        abilities_set = set(abilities)
 
-        invalid_abilities = set(abilities) - self.VALID_MULTIMODAL_ABILITIES
+        if "None" in abilities_set and len(abilities_set) > 1:
+            raise ValueError("'None' cannot exist with other abilities")
+
+        invalid_abilities = abilities_set - self.VALID_MULTIMODAL_ABILITIES
         if invalid_abilities:
             raise ValueError(f"Invalid multimodal abilities: {invalid_abilities}")
 
-    def _extract_repo_name(self, repo: str) -> str:
+    @staticmethod
+    def _extract_repo_name(repo: str) -> str:
         return repo.strip().split('/')[-1]
 
     def _generate_display_name(self, model_config: Dict[str, Union[str, List[str]]]) -> str:
@@ -278,23 +291,25 @@ class ModelManager:
         quantize = model_config.get("quantize") or "None"
         multimodal_ability = model_config.get("multimodal_ability", [])
 
+        name_parts = [model_name, f"({default_language},{quantize}"]
+
         if multimodal_ability and "None" not in multimodal_ability:
             abilities_str = "".join(multimodal_ability)
-            return f"{model_name}({default_language},{quantize},{abilities_str})"
+            name_parts.insert(-1, f",{abilities_str}")
 
-        return f"{model_name}({default_language},{quantize})"
+        return "".join(name_parts) + ")"
 
     def get_config_path(self, model_config: Dict[str, Union[str, List[str]]]) -> Path:
         if model_config.get("type") == ModelType.OPENAI_API.value:
             model_name = model_config.get('model_name')
             if not model_name:
-                raise RuntimeError("'model_name' not specified for OpenAI API Model.")
+                raise RuntimeError("'model_name' not specified for OpenAI API Model")
             return self.configs_dir / f"{model_name}{self.CONFIG_EXTENSION}"
 
         mlx_repo = model_config.get("mlx_repo")
         if not mlx_repo:
             model_name = model_config.get('model_name', 'unknown')
-            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
+            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'")
 
         repo_name = self._extract_repo_name(mlx_repo)
         return self.configs_dir / f"{repo_name}{self.CONFIG_EXTENSION}"
@@ -303,7 +318,7 @@ class ModelManager:
         mlx_repo = model_config.get("mlx_repo")
         if not mlx_repo:
             model_name = model_config.get('model_name', 'unknown')
-            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'.")
+            raise RuntimeError(f"'mlx_repo' not specified for model '{model_name}'")
 
         return self.models_dir / self._extract_repo_name(mlx_repo)
 
@@ -311,10 +326,13 @@ class ModelManager:
         self.model_configs = self.scan_models()
         return sorted(self.model_configs.keys())
 
-    def create_config_json(self, model_config: Dict[str, Union[str, List[str]]]) -> None:
+    def _save_config_to_file(self, model_config: Dict[str, Union[str, List[str]]]) -> None:
         config_path = self.get_config_path(model_config)
-        with config_path.open("w", encoding="utf-8") as f:
-            json.dump(model_config, f, ensure_ascii=False, indent=4)
+        try:
+            with config_path.open("w", encoding="utf-8") as f:
+                json.dump(model_config, f, ensure_ascii=False, indent=4)
+        except OSError as e:
+            raise RuntimeError(f"Failed to save config to {config_path}: {e}")
 
     def add_config(self,
                    original_repo: str,
@@ -329,12 +347,13 @@ class ModelManager:
         self._validate_quantize(quantize)
 
         if default_language not in self.VALID_LANGUAGES:
-            raise ValueError(f"default_language must be one of {self.VALID_LANGUAGES}.")
+            raise ValueError(f"default_language must be one of {self.VALID_LANGUAGES}, got: '{default_language}'")
 
         self._validate_multimodal_ability(multimodal_ability)
 
-        system_prompt = system_prompt.strip() if system_prompt and system_prompt.strip() else None
-        final_model_name = (model_name.strip() if model_name and model_name.strip() else self._extract_repo_name(mlx_repo))
+        clean_system_prompt = system_prompt.strip() if system_prompt else None
+        final_model_name = (model_name.strip() if model_name else
+                            self._extract_repo_name(mlx_repo))
 
         model_config = {
             "original_repo": original_repo.strip(),
@@ -342,19 +361,29 @@ class ModelManager:
             "model_name": final_model_name,
             "quantize": None if quantize == "None" else quantize,
             "default_language": default_language,
-            "system_prompt": system_prompt,
-            "multimodal_ability": [] if multimodal_ability == ["None"] else (multimodal_ability or [])
+            "system_prompt": clean_system_prompt,
+            "multimodal_ability": self._process_multimodal_abilities(multimodal_ability)
         }
 
         display_name = self._generate_display_name(model_config)
         model_config["display_name"] = display_name
 
-        self.create_config_json(model_config)
+        self._save_config_to_file(model_config)
         self.model_configs[display_name] = model_config
 
-    def add_api_config(self, model_name: str, api_key: str, nick_name: Optional[str], base_url: Optional[str] = None, system_prompt: Optional[str] = None):
+    def _process_multimodal_abilities(self, abilities: Optional[List[str]]) -> List[str]:
+        if not abilities or abilities == ["None"]:
+            return []
+        return abilities
+
+    def add_api_config(self,
+                       model_name: str,
+                       api_key: str,
+                       nick_name: Optional[str] = None,
+                       base_url: Optional[str] = None,
+                       system_prompt: Optional[str] = None) -> None:
         if not model_name or not api_key:
-            raise ValueError("model_name and api_key are required.")
+            raise ValueError("model_name and api_key are required")
 
         model_config = {
             "model_name": model_name,
@@ -368,15 +397,20 @@ class ModelManager:
         display_name = self._generate_display_name(model_config)
         model_config["display_name"] = display_name
 
-        self.create_config_json(model_config)
+        self._save_config_to_file(model_config)
         self.model_configs[display_name] = model_config
 
-    def _process_config_file(self, config_file: Path) -> Optional[tuple]:
+    def _load_config_file(self, config_file: Path) -> Optional[Dict]:
         try:
             with config_file.open("r", encoding="utf-8") as f:
-                model_config = json.load(f)
-        except json.JSONDecodeError as e:
-            logging.error(f"Error decoding JSON from {config_file}: {e}")
+                return json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logging.error(f"Error loading config from {config_file}: {e}")
+            return None
+
+    def _process_config_file(self, config_file: Path) -> Optional[Tuple[str, Dict]]:
+        model_config = self._load_config_file(config_file)
+        if not model_config:
             return None
 
         if model_config.get("type") == ModelType.OPENAI_API.value:
@@ -384,7 +418,7 @@ class ModelManager:
         else:
             return self._process_local_config(model_config)
 
-    def _process_api_config(self, model_config: Dict) -> Optional[tuple]:
+    def _process_api_config(self, model_config: Dict) -> Optional[Tuple[str, Dict]]:
         api_key = model_config.get("api_key")
         if not api_key or not api_key.strip():
             return None
@@ -393,11 +427,9 @@ class ModelManager:
         model_config["display_name"] = display_name
         return display_name, model_config
 
-    def _process_local_config(self, model_config: Dict) -> Optional[tuple]:
-        model_name = model_config.get("model_name")
-        default_language = model_config.get("default_language")
-
-        if not all([model_name, default_language]):
+    def _process_local_config(self, model_config: Dict) -> Optional[Tuple[str, Dict]]:
+        required_fields = ["model_name", "default_language"]
+        if not all(model_config.get(field) for field in required_fields):
             return None
 
         if "quantize" not in model_config or not model_config["quantize"]:
@@ -410,7 +442,9 @@ class ModelManager:
     def scan_models(self) -> Dict[str, Dict[str, Union[str, List[str]]]]:
         model_configs = {}
 
-        for config_file in self.configs_dir.glob(f"*{self.CONFIG_EXTENSION}"):
+        config_files = list(self.configs_dir.glob(f"*{self.CONFIG_EXTENSION}"))
+
+        for config_file in config_files:
             if not config_file.is_file():
                 continue
 
@@ -429,7 +463,7 @@ class ModelManager:
 
         model_config = self.model_configs.get(model_name)
         if not model_config:
-            raise RuntimeError(f"Model '{model_name}' not found.")
+            raise RuntimeError(f"Model '{model_name}' not found")
 
         try:
             if model_config.get("type") == ModelType.OPENAI_API.value:
@@ -438,11 +472,18 @@ class ModelManager:
                 self._load_local_model(model_config)
 
             self.model_config = model_config
+            logging.info(f"Successfully loaded model: {model_name}")
+
         except Exception as e:
+            logging.error(f"Error loading model '{model_name}': {e}")
             raise RuntimeError(f"Error loading model '{model_name}': {e}")
 
     def _load_openai_model(self, model_config: Dict) -> None:
-        self.model = OpenAIModel(model_config.get("api_key"), model_config.get("model_name"), model_config.get("base_url"))
+        self.model = OpenAIModel(
+            api_key=model_config.get("api_key"),
+            model_name=model_config.get("model_name"),
+            base_url=model_config.get("base_url")
+        )
 
     def _load_local_model(self, model_config: Dict) -> None:
         local_model_path = self.get_model_path(model_config)
@@ -451,29 +492,41 @@ class ModelManager:
             self._download_model(model_config, local_model_path)
 
         multimodal_ability = model_config.get("multimodal_ability", [])
-        is_vision_model = multimodal_ability and "vision" in multimodal_ability
+        is_vision_model = "vision" in multimodal_ability
 
-        ModelClass = VisionModel if is_vision_model else TextModel
-        self.model = ModelClass(str(local_model_path))
+        if is_vision_model:
+            self.model = VisionModel(str(local_model_path))
+        else:
+            self.model = TextModel(str(local_model_path))
 
     def _download_model(self, model_config: Dict, local_model_path: Path) -> None:
         mlx_repo = model_config.get("mlx_repo")
+        logging.info(f"Downloading model from {mlx_repo}...")
+
         try:
             from huggingface_hub import snapshot_download
             snapshot_download(repo_id=mlx_repo, local_dir=str(local_model_path))
+            logging.info(f"Model downloaded successfully to {local_model_path}")
         except Exception as e:
             raise RuntimeError(f"Failed to download model from '{mlx_repo}': {e}")
 
     def close_model(self) -> None:
+        self.close_active_generator()
+
         if self.model:
-            self.model.close()
-            self.model = None
-            self.model_config = None
+            try:
+                self.model.close()
+            except Exception as e:
+                logging.error(f"Error closing model: {e}")
+            finally:
+                self.model = None
+                self.model_config = None
+
             gc.collect()
             mlx.core.clear_cache()
 
-    def get_loaded_model(self) -> Union[BaseLocalModel, OpenAIModel, None]:
-        return weakref.ref(self.model)() if self.model else None
+    def get_loaded_model(self) -> Optional[Union['BaseLocalModel', 'OpenAIModel']]:
+        return self.model
 
     def get_loaded_model_config(self) -> Optional[Dict[str, Union[str, List[str]]]]:
         return self.model_config
@@ -498,8 +551,9 @@ class ModelManager:
         return mlx.core.get_cache_memory()
 
     def get_system_memory_usage(self) -> int:
-        logging.info(self.get_active_memory() + self.get_cache_memory())
-        return self.get_active_memory() + self.get_cache_memory()
+        total_usage = self.get_active_memory() + self.get_cache_memory()
+        logging.info(f"System memory usage: {total_usage}")
+        return total_usage
 
     def get_device_info(self) -> Dict[str, Union[str, int]]:
         return mlx.core.metal.device_info()
@@ -509,21 +563,52 @@ class ModelManager:
 
     def set_memory_usage_level(self, memory_usage_level: MemoryUsageLevel) -> None:
         self.memory_usage_level = memory_usage_level
-        self.set_memory_usage_policy(self.memory_usage_level)
+        self._apply_memory_policy(memory_usage_level)
 
-    def set_memory_usage_policy(self, memory_usage_level: MemoryUsageLevel) -> None:
+    def _apply_memory_policy(self, memory_usage_level: MemoryUsageLevel) -> None:
         device_info = self.get_device_info()
         max_recommended_working_set_size = device_info.get("max_recommended_working_set_size")
         memory_size = device_info.get("memory_size")
+
         if memory_usage_level == MemoryUsageLevel.STRICT:
-            mlx.core.set_wired_limit(max_recommended_working_set_size)
-            mlx.core.set_memory_limit(memory_size - max_recommended_working_set_size)
-            mlx.core.set_cache_limit(0)
+            self._set_strict_memory_policy(max_recommended_working_set_size, memory_size)
         elif memory_usage_level == MemoryUsageLevel.HIGH:
-            mlx.core.set_wired_limit(round(max_recommended_working_set_size / 2))
-            mlx.core.set_memory_limit(memory_size - round(max_recommended_working_set_size / 2))
-            mlx.core.set_cache_limit(memory_size - round(max_recommended_working_set_size / 2))
+            self._set_high_memory_policy(max_recommended_working_set_size, memory_size)
         else:
-            mlx.core.set_wired_limit(0)
-            mlx.core.set_memory_limit(memory_size)
-            mlx.core.set_cache_limit(memory_size)
+            self._set_unlimited_memory_policy(memory_size)
+
+    def _set_strict_memory_policy(self, max_recommended_size: int, memory_size: int) -> None:
+        wired_limit = max_recommended_size
+        available_memory = memory_size - wired_limit
+
+        mlx.core.set_wired_limit(wired_limit)
+        mlx.core.set_memory_limit(int(available_memory * self.STRICT_MEMORY_RATIO))
+        mlx.core.set_cache_limit(int(available_memory * self.STRICT_CACHE_RATIO))
+
+    def _set_high_memory_policy(self, max_recommended_size: int, memory_size: int) -> None:
+        wired_limit = int(max_recommended_size * self.HIGH_WIRED_MULTIPLIER)
+        available_memory = memory_size - wired_limit
+
+        mlx.core.set_wired_limit(wired_limit)
+        mlx.core.set_memory_limit(int(available_memory * self.HIGH_MEMORY_RATIO))
+        mlx.core.set_cache_limit(int(available_memory * self.HIGH_CACHE_RATIO))
+
+    def _set_unlimited_memory_policy(self, memory_size: int) -> None:
+        mlx.core.set_wired_limit(0)
+        mlx.core.set_memory_limit(memory_size)
+        mlx.core.set_cache_limit(memory_size)
+
+    def set_active_generator(self, gen) -> None:
+        self.active_generator.append(gen)
+
+    def close_active_generator(self) -> None:
+        if self.active_generator:
+            try:
+                for gen in self.active_generator:
+                    gen.close()
+                    self.active_generator.remove(gen)
+
+                    gc.collect()
+                    mlx.core.clear_cache()
+            except Exception as e:
+                logging.info(f"Failed to close active generator: {e}")
