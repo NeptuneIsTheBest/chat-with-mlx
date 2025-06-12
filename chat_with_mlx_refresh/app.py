@@ -11,8 +11,8 @@ from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 
 import gradio as gr
-import mlx.core.metal
 from gradio.components.chatbot import ChatMessage
+from pandas import DataFrame
 
 from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock, SystemStatusBlock
 from .language import get_text
@@ -36,7 +36,7 @@ completion_load_model_block = LoadModelBlock(model_manager=model_manager)
 
 completion_advanced_setting_block = AdvancedSettingBlock()
 
-model_management_add_loacl_model_block = AddLocalModelBlock(model_manager=model_manager)
+model_management_add_local_model_block = AddLocalModelBlock(model_manager=model_manager)
 model_management_add_api_model_block = AddAPIModelBlock(model_manager=model_manager)
 
 
@@ -53,31 +53,6 @@ def get_file_md5(file_name: Path) -> str:
         for chunk in iter(lambda: f.read(4096), b""):
             md5.update(chunk)
     return md5.hexdigest()
-
-
-try:
-    import pypdf
-except ImportError:
-    pypdf = None
-    logger.warning("pypdf not found.")
-
-try:
-    import docx
-except ImportError:
-    docx = None
-    logger.warning("docx not found.")
-
-try:
-    from pptx import Presentation
-except ImportError:
-    Presentation = None
-    logger.warning("pptx not found.")
-
-try:
-    import pandas as pd
-except ImportError:
-    pd = None
-    logger.warning("pandas not found.")
 
 
 class FileManager:
@@ -110,21 +85,25 @@ class FileManager:
             return None
 
     def load_pdf(self, file_name: Path):
-        if not pypdf:
+        try:
+            from pypdf import PdfReader
+
+            pdf = PdfReader(file_name)
+            content_parts = []
+            for page in pdf.pages:
+                text = page.extract_text()
+                if text:
+                    content_parts.append(text)
+            content = ''.join(content_parts)
+            formatted_content = self.format_content(file_name, content)
+            self.files[file_name.name] = {
+                "md5": get_file_md5(file_name),
+                "content": formatted_content
+            }
+            return formatted_content
+        except ImportError:
             logger.warning("pypdf not found.")
             return None
-        pdf = pypdf.PdfReader(file_name)
-        content = ''
-        for page in pdf.pages:
-            text = page.extract_text()
-            if text:
-                content += text
-        formatted_content = self.format_content(file_name, content)
-        self.files[file_name.name] = {
-            "md5": get_file_md5(file_name),
-            "content": formatted_content
-        }
-        return formatted_content
 
     def load_txt_like(self, file_name: Path):
         with open(file_name, 'r', encoding='utf-8') as f:
@@ -137,51 +116,63 @@ class FileManager:
         return formatted_content
 
     def load_docx(self, file_name: Path):
-        if not docx:
+        try:
+            from docx import Document
+
+            doc = Document(str(file_name))
+            content = "\n".join([para.text for para in doc.paragraphs])
+            formatted_content = self.format_content(file_name, content)
+            self.files[file_name.name] = {
+                "md5": get_file_md5(file_name),
+                "content": formatted_content
+            }
+            return formatted_content
+        except ImportError:
             logger.warning("docx not found.")
             return None
-        doc = docx.Document(str(file_name))
-        content = "\n".join([para.text for para in doc.paragraphs])
-        formatted_content = self.format_content(file_name, content)
-        self.files[file_name.name] = {
-            "md5": get_file_md5(file_name),
-            "content": formatted_content
-        }
-        return formatted_content
 
     def load_pptx(self, file_name: Path):
-        if not Presentation:
+        try:
+            from pptx import Presentation
+
+            prs = Presentation(str(file_name))
+            content_parts = []
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text") and shape.text:
+                        content_parts.append(shape.text)
+            content = "\n".join(content_parts)  # 使用换行符连接
+            formatted_content = self.format_content(file_name, content)
+            self.files[file_name.name] = {
+                "md5": get_file_md5(file_name),
+                "content": formatted_content
+            }
+            return formatted_content
+        except ImportError:
             logger.warning("pptx not found.")
             return None
-        prs = Presentation(str(file_name))
-        content = ""
-        for slide in prs.slides:
-            for shape in slide.shapes:
-                if hasattr(shape, "text"):
-                    content += shape.text + "\n"
-        formatted_content = self.format_content(file_name, content)
-        self.files[file_name.name] = {
-            "md5": get_file_md5(file_name),
-            "content": formatted_content
-        }
-        return formatted_content
 
     def load_excel(self, file_name: Path):
-        if not pd:
+        try:
+            from pandas import ExcelFile, read_excel
+            excel_file = ExcelFile(file_name)
+            content_parts = []
+
+            for sheet_name in excel_file.sheet_names:
+                df = read_excel(excel_file, sheet_name=sheet_name)
+                content_parts.append(f"Sheet: {sheet_name}\n")
+                content_parts.append(df.to_csv(index=False))
+
+            content = ''.join(content_parts)
+            formatted_content = self.format_content(file_name, content)
+            self.files[file_name.name] = {
+                "md5": get_file_md5(file_name),
+                "content": formatted_content
+            }
+            return formatted_content
+        except ImportError:
             logger.warning("pandas not found.")
             return None
-        excel_file = pd.ExcelFile(file_name)
-        content = ""
-        for sheet_name in excel_file.sheet_names:
-            df = pd.read_excel(excel_file, sheet_name=sheet_name)
-            content += f"Sheet: {sheet_name}\n"
-            content += df.to_csv(index=False)
-        formatted_content = self.format_content(file_name, content)
-        self.files[file_name.name] = {
-            "md5": get_file_md5(file_name),
-            "content": formatted_content
-        }
-        return formatted_content
 
 
 file_manager = FileManager()
@@ -424,8 +415,8 @@ def handle_chat(message: Dict,
 
             chat_message_accumulator = ChatMessage(role="assistant", content="")
             thinking_message = None
-            thinking_content = ""
-            final_content = ""
+            thinking_content_parts = []
+            final_content_parts = []
             in_thinking = False
             thinking_start_time = None
             chunk_buffer = ""
@@ -437,7 +428,7 @@ def handle_chat(message: Dict,
                     if chunk.choices:
                         delta = chunk.choices[0].delta
                         if delta.content:
-                            chunk_text = chunk_buffer + delta.content
+                            chunk_text = ''.join([chunk_buffer, delta.content])
                             chunk_buffer = ""
 
                             for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think"]:
@@ -453,15 +444,15 @@ def handle_chat(message: Dict,
 
                             if should_stop:
                                 if in_thinking:
-                                    thinking_content += chunk_text
-                                    thinking_message.content = thinking_content
+                                    thinking_content_parts.append(chunk_text)
+                                    thinking_message.content = ''.join(thinking_content_parts)
                                     thinking_message.metadata["title"] = "Thought for"
                                     thinking_message.metadata["status"] = "done"
                                     thinking_message.metadata["duration"] = time.time() - thinking_start_time
                                     yield [thinking_message, chat_message_accumulator]
                                 else:
-                                    final_content += chunk_text
-                                    chat_message_accumulator.content = final_content
+                                    final_content_parts.append(chunk_text)
+                                    chat_message_accumulator.content = ''.join(final_content_parts)
                                     if thinking_message and thinking_message.metadata.get("status") == "done":
                                         yield [thinking_message, chat_message_accumulator]
                                     else:
@@ -478,29 +469,29 @@ def handle_chat(message: Dict,
                                 )
                                 think_start_idx = chunk_text.find("<think>") + len("<think>")
                                 if think_start_idx < len(chunk_text):
-                                    thinking_content += chunk_text[think_start_idx:]
-                                    thinking_message.content = thinking_content
+                                    thinking_content_parts.append(chunk_text[think_start_idx:])
+                                    thinking_message.content = ''.join(thinking_content_parts)
                                 yield thinking_message
                                 continue
 
                             elif in_thinking and "</think>" not in chunk_text:
-                                thinking_content += chunk_text
-                                thinking_message.content = thinking_content
+                                thinking_content_parts.append(chunk_text)
+                                thinking_message.content = ''.join(thinking_content_parts)
                                 yield thinking_message
                                 continue
 
                             elif in_thinking and "</think>" in chunk_text:
                                 think_end_idx = chunk_text.find("</think>")
-                                thinking_content += chunk_text[:think_end_idx]
-                                thinking_message.content = thinking_content
+                                thinking_content_parts.append(chunk_text[:think_end_idx])
+                                thinking_message.content = ''.join(thinking_content_parts)
                                 thinking_message.metadata["title"] = "Thought for"
                                 thinking_message.metadata["status"] = "done"
                                 thinking_message.metadata["duration"] = time.time() - thinking_start_time
 
                                 remaining_content = chunk_text[think_end_idx + len("</think>"):]
                                 if remaining_content.strip():
-                                    final_content += remaining_content
-                                    chat_message_accumulator.content = final_content
+                                    final_content_parts.append(remaining_content)
+                                    chat_message_accumulator.content = ''.join(final_content_parts)
 
                                 yield [thinking_message, chat_message_accumulator]
                                 in_thinking = False
@@ -525,14 +516,14 @@ def handle_chat(message: Dict,
 
                                         before_think = chunk_text[:chunk_text.find("<think>")]
                                         after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
-                                        final_content += before_think + after_think
-                                        chat_message_accumulator.content = final_content
+                                        final_content_parts.extend([before_think, after_think])
+                                        chat_message_accumulator.content = ''.join(final_content_parts)
 
                                         yield [thinking_message, chat_message_accumulator]
                                         continue
                                 else:
-                                    final_content += chunk_text
-                                    chat_message_accumulator.content = final_content
+                                    final_content_parts.append(chunk_text)
+                                    chat_message_accumulator.content = ''.join(final_content_parts)
                                     if thinking_message and thinking_message.metadata.get("status") == "done":
                                         yield [thinking_message, chat_message_accumulator]
                                     else:
@@ -607,8 +598,8 @@ def handle_chat(message: Dict,
 
             chat_message_accumulator = ChatMessage(role="assistant", content="")
             thinking_message = None
-            thinking_content = ""
-            final_content = ""
+            thinking_content_parts = []
+            final_content_parts = []
             in_thinking = False
             thinking_start_time = None
             chunk_buffer = ""
@@ -632,7 +623,7 @@ def handle_chat(message: Dict,
                             break
                         chunk_text = chunk_text.split(eos_token)[0]
 
-                    chunk_text = chunk_buffer + chunk_text
+                    chunk_text = ''.join([chunk_buffer, chunk_text])
                     chunk_buffer = ""
 
                     for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think"]:
@@ -648,16 +639,16 @@ def handle_chat(message: Dict,
 
                     if should_stop:
                         if in_thinking:
-                            thinking_content += chunk_text
-                            thinking_message.content = thinking_content
+                            thinking_content_parts.append(chunk_text)
+                            thinking_message.content = ''.join(thinking_content_parts)
                             thinking_message.metadata["title"] = "Thought for"
                             thinking_message.metadata["status"] = "done"
                             thinking_message.metadata["duration"] = time.time() - thinking_start_time
                             if stream:
                                 yield [thinking_message, chat_message_accumulator]
                         else:
-                            final_content += chunk_text
-                            chat_message_accumulator.content = final_content
+                            final_content_parts.append(chunk_text)
+                            chat_message_accumulator.content = ''.join(final_content_parts)
                             if thinking_message and thinking_message.metadata.get("status") == "done":
                                 if stream:
                                     yield [thinking_message, chat_message_accumulator]
@@ -676,31 +667,31 @@ def handle_chat(message: Dict,
                         )
                         think_start_idx = chunk_text.find("<think>") + len("<think>")
                         if think_start_idx < len(chunk_text):
-                            thinking_content += chunk_text[think_start_idx:]
-                            thinking_message.content = thinking_content
+                            thinking_content_parts.append(chunk_text[think_start_idx:])
+                            thinking_message.content = ''.join(thinking_content_parts)
                         if stream:
                             yield thinking_message
                         continue
 
                     elif in_thinking and "</think>" not in chunk_text:
-                        thinking_content += chunk_text
-                        thinking_message.content = thinking_content
+                        thinking_content_parts.append(chunk_text)
+                        thinking_message.content = ''.join(thinking_content_parts)
                         if stream:
                             yield thinking_message
                         continue
 
                     elif in_thinking and "</think>" in chunk_text:
                         think_end_idx = chunk_text.find("</think>")
-                        thinking_content += chunk_text[:think_end_idx]
-                        thinking_message.content = thinking_content
+                        thinking_content_parts.append(chunk_text[:think_end_idx])
+                        thinking_message.content = ''.join(thinking_content_parts)
                         thinking_message.metadata['title'] = "Thought for"
                         thinking_message.metadata["status"] = "done"
                         thinking_message.metadata["duration"] = time.time() - thinking_start_time
 
                         remaining_content = chunk_text[think_end_idx + len("</think>"):]
                         if remaining_content.strip():
-                            final_content += remaining_content
-                            chat_message_accumulator.content = final_content
+                            final_content_parts.append(remaining_content)
+                            chat_message_accumulator.content = ''.join(final_content_parts)
 
                         if stream:
                             yield [thinking_message, chat_message_accumulator]
@@ -726,15 +717,15 @@ def handle_chat(message: Dict,
 
                                 before_think = chunk_text[:chunk_text.find("<think>")]
                                 after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
-                                final_content += before_think + after_think
-                                chat_message_accumulator.content = final_content
+                                final_content_parts.extend([before_think, after_think])
+                                chat_message_accumulator.content = ''.join(final_content_parts)
 
                                 if stream:
                                     yield [thinking_message, chat_message_accumulator]
                                 continue
                         else:
-                            final_content += chunk_text
-                            chat_message_accumulator.content = final_content
+                            final_content_parts.append(chunk_text)
+                            chat_message_accumulator.content = ''.join(final_content_parts)
                             if thinking_message and thinking_message.metadata.get("status") == "done":
                                 if stream:
                                     yield [thinking_message, chat_message_accumulator]
@@ -753,8 +744,6 @@ def handle_chat(message: Dict,
     except Exception as e:
         logger.exception("Error in handle_chat:")
         raise gr.Error(str(e))
-    finally:
-        del model
 
 
 def managed_chat_generator(
@@ -788,7 +777,6 @@ def managed_chat_generator(
     try:
         yield from g
     finally:
-        logging.info("Managed generator wrapper is finishing. Clearing active generator.")
         model_manager.close_active_generator()
 
 
@@ -810,7 +798,7 @@ def handle_completion(prompt: str,
         repetition_penalty = float(repetition_penalty)
 
         if not stream:
-            return prompt + model.generate_completion(
+            completion_text = model.generate_completion(
                 prompt=prompt,
                 stream=stream,
                 temperature=temperature,
@@ -819,9 +807,11 @@ def handle_completion(prompt: str,
                 min_p=min_p,
                 max_tokens=max_tokens,
                 repetition_penalty=repetition_penalty)
+            return ''.join([prompt, completion_text])
         else:
-            response = prompt
+            response_parts = [prompt]
             eos_token = model.tokenizer.eos_token
+
             for chunk in model.generate_completion(
                     prompt=prompt,
                     stream=stream,
@@ -833,6 +823,7 @@ def handle_completion(prompt: str,
                     repetition_penalty=repetition_penalty):
                 if generation_stop_event.is_set():
                     break
+
                 chunk_text = ""
                 if isinstance(chunk, str):
                     chunk_text = chunk
@@ -842,12 +833,18 @@ def handle_completion(prompt: str,
                     chunk_text = chunk.choices[0].delta.content
                 else:
                     logger.warning(f"Unexpected chunk type from model: {type(chunk)}")
-                if eos_token not in chunk_text:
-                    response += chunk_text
-                    yield response
-                else:
-                    yield response
-                    break
+
+                if chunk_text:
+                    if eos_token not in chunk_text:
+                        response_parts.append(chunk_text)
+                        yield ''.join(response_parts)
+                    else:
+                        if eos_token in chunk_text:
+                            before_eos = chunk_text.split(eos_token)[0]
+                            if before_eos:
+                                response_parts.append(before_eos)
+                        yield ''.join(response_parts)
+                        break
             return None
     except Exception as e:
         raise gr.Error(str(e))
@@ -881,7 +878,6 @@ def managed_completion_generator(prompt: str,
     try:
         yield from g
     finally:
-        logging.info("Managed completion generator wrapper is finishing.")
         model_manager.close_active_generator()
 
 
@@ -922,7 +918,7 @@ def get_default_system_prompt_callback():
 
 
 def update_model_management_models_list():
-    return pd.DataFrame({get_text("Page.ModelManagement.Dataframe.model_list.headers"): model_manager.get_model_list()})
+    return DataFrame({get_text("Page.ModelManagement.Dataframe.model_list.headers"): model_manager.get_model_list()})
 
 
 def update_model_selector_choices():
@@ -992,7 +988,7 @@ def bytes_to_gigabytes(value):
 
 def update_memory_usage() -> str:
     memory_usage_bytes = model_manager.get_system_memory_usage()
-    total_memory_bytes = mlx.core.metal.device_info()["memory_size"]
+    total_memory_bytes = model_manager.get_device_info()["memory_size"]
 
     memory_usage_gb = bytes_to_gigabytes(memory_usage_bytes) if isinstance(memory_usage_bytes, (int, float)) else "N/A"
     total_memory_gb = bytes_to_gigabytes(total_memory_bytes) if isinstance(total_memory_bytes, (int, float)) else "N/A"
@@ -1193,17 +1189,17 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
 
             with gr.Column(scale=5):
                 with gr.Tab(get_text("Page.ModelManagement.Tab.local_model")):
-                    model_management_add_loacl_model_block.render_all()
-                    model_management_add_loacl_model_block.add_button.click(
+                    model_management_add_local_model_block.render_all()
+                    model_management_add_local_model_block.add_button.click(
                         fn=add_model,
                         inputs=[
-                            model_management_add_loacl_model_block.model_name_textbox,
-                            model_management_add_loacl_model_block.original_repo_textbox,
-                            model_management_add_loacl_model_block.mlx_repo_textbox,
-                            model_management_add_loacl_model_block.quantize_dropdown,
-                            model_management_add_loacl_model_block.default_language_dropdown,
-                            model_management_add_loacl_model_block.default_system_prompt_textbox,
-                            model_management_add_loacl_model_block.multimodal_ability_dropdown
+                            model_management_add_local_model_block.model_name_textbox,
+                            model_management_add_local_model_block.original_repo_textbox,
+                            model_management_add_local_model_block.mlx_repo_textbox,
+                            model_management_add_local_model_block.quantize_dropdown,
+                            model_management_add_local_model_block.default_language_dropdown,
+                            model_management_add_local_model_block.default_system_prompt_textbox,
+                            model_management_add_local_model_block.multimodal_ability_dropdown
                         ]
                     ).then(
                         fn=update_model_management_models_list,
