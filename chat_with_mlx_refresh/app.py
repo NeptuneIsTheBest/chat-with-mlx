@@ -986,7 +986,7 @@ def bytes_to_gigabytes(value):
     return value / 1024 ** 3
 
 
-def update_memory_usage() -> str:
+def get_memory_usage() -> str:
     memory_usage_bytes = model_manager.get_system_memory_usage()
     total_memory_bytes = model_manager.get_device_info()["memory_size"]
 
@@ -996,14 +996,19 @@ def update_memory_usage() -> str:
     return "{:.2f} GB | {:.2f} GB".format(memory_usage_gb, total_memory_gb)
 
 
+def update_all_memory_usage() -> list[str]:
+    memory_usage = get_memory_usage()
+    return [memory_usage, memory_usage]
+
+
 with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     update_memory_usage_timer = gr.Timer(value=1, active=True)
     update_memory_usage_timer.tick(
-        fn=lambda: update_memory_usage(),
-        outputs=[chat_system_status_block.memory_usage_textbox]
-    ).then(
-        fn=lambda: update_memory_usage(),
-        outputs=[completion_system_status_block.memory_usage_textbox]
+        fn=update_all_memory_usage,
+        outputs=[
+            chat_system_status_block.memory_usage_textbox,
+            completion_system_status_block.memory_usage_textbox
+        ]
     )
 
     gr.HTML("<h1>Chat with MLX</h1>")
@@ -1270,11 +1275,11 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         inputs=[completion_advanced_setting_block.max_tokens_slider],
         outputs=[completion_advanced_setting_block.max_tokens_slider]
     ).then(
-        fn=lambda: update_memory_usage(),
-        outputs=[chat_system_status_block.memory_usage_textbox]
-    ).then(
-        fn=lambda: update_memory_usage(),
-        outputs=[completion_system_status_block.memory_usage_textbox]
+        fn=update_all_memory_usage,
+        outputs=[
+            chat_system_status_block.memory_usage_textbox,
+            completion_system_status_block.memory_usage_textbox
+        ]
     )
 
 
