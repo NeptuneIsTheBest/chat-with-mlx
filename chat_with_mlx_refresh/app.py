@@ -14,30 +14,14 @@ import gradio as gr
 from gradio.components.chatbot import ChatMessage
 from pandas import DataFrame
 
-from .chat import ChatSystemPromptBlock, LoadModelBlock, AdvancedSettingBlock, RAGSettingBlock, SystemStatusBlock
 from .language import get_text
 from .model import Message, MessageRole, ModelManager, TextModel, VisionModel, OpenAIModel
-from .model_management import AddLocalModelBlock, AddAPIModelBlock
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
 model_manager = ModelManager()
 generation_stop_event = threading.Event()
-
-chat_system_status_block = SystemStatusBlock(model_manager)
-chat_system_prompt_block = ChatSystemPromptBlock(model_manager=model_manager)
-chat_load_model_block = LoadModelBlock(model_manager=model_manager)
-chat_advanced_setting_block = AdvancedSettingBlock()
-chat_rag_setting_block = RAGSettingBlock()
-
-completion_system_status_block = SystemStatusBlock(model_manager=model_manager)
-completion_load_model_block = LoadModelBlock(model_manager=model_manager)
-
-completion_advanced_setting_block = AdvancedSettingBlock()
-
-model_management_add_local_model_block = AddLocalModelBlock(model_manager=model_manager)
-model_management_add_api_model_block = AddAPIModelBlock(model_manager=model_manager)
 
 
 def get_loaded_model() -> Union[TextModel, VisionModel, OpenAIModel]:
@@ -848,8 +832,6 @@ def handle_completion(prompt: str,
             return None
     except Exception as e:
         raise gr.Error(str(e))
-    finally:
-        del model
 
 
 def managed_completion_generator(prompt: str,
@@ -921,8 +903,15 @@ def update_model_management_models_list():
     return DataFrame({get_text("Page.ModelManagement.Dataframe.model_list.headers"): model_manager.get_model_list()})
 
 
+def update_select_model_dropdown_value():
+    if model_manager.get_loaded_model_config():
+        return model_manager.get_loaded_model_config().get("display_name")
+    else:
+        return model_manager.get_model_list()[0] if len(model_manager.get_model_list()) > 0 else None
+
+
 def update_model_selector_choices():
-    return gr.update(choices=model_manager.get_model_list(), value=chat_load_model_block.update_select_model_dropdown_value())
+    return gr.update(choices=model_manager.get_model_list(), value=update_select_model_dropdown_value())
 
 
 def add_model(model_name: Optional[str], original_repo: str, mlx_repo: str, quantize: str, default_language: str, default_system_prompt: Optional[str], multimodal_ability: List[str]):
@@ -1001,14 +990,268 @@ def update_all_memory_usage() -> list[str]:
     return [memory_usage, memory_usage]
 
 
+def create_slider(min_val, max_val, default_val, label_key, **kwargs):
+    return gr.Slider(
+        minimum=min_val,
+        maximum=max_val,
+        value=default_val,
+        label=get_text(label_key),
+        render=False,
+        interactive=True,
+        **kwargs
+    )
+
+
+def create_textbox(label_key, placeholder_key=None, **kwargs):
+    params = {
+        'label': get_text(label_key),
+        'render': False,
+        'interactive': True,
+        **kwargs
+    }
+    if placeholder_key:
+        params['placeholder'] = get_text(placeholder_key)
+    return gr.Textbox(**params)
+
+
+def create_model_controls():
+    memory_usage = gr.Textbox(
+        label=get_text("Page.Chat.SystemStatusBlock.Textbox.memory_usage.label"),
+        interactive=False,
+        render=False
+    )
+
+    model_selector = gr.Dropdown(
+        label=get_text("Page.Chat.LoadModelBlock.Dropdown.model_selector.label"),
+        choices=model_manager.get_model_list(),
+        render=False,
+        interactive=True
+    )
+
+    model_status = gr.Textbox(
+        value=get_load_model_status,
+        show_label=False,
+        render=False,
+        interactive=False
+    )
+
+    load_button = gr.Button(
+        value=get_text("Page.Chat.LoadModelBlock.Button.load_model.value"),
+        render=False,
+        interactive=True
+    )
+
+    return memory_usage, model_selector, model_status, load_button
+
+
+def create_generation_params():
+    slider_configs = {
+        'temperature': (0.0, 2.0, 0.6),
+        'top_k': (0, 100, 20),
+        'top_p': (0.0, 1.0, 0.95),
+        'min_p': (0.0, 1.0, 0.0),
+        'max_tokens': (1, 32768, 4096),
+        'repetition_penalty': (0.0, 2.0, 1.0)
+    }
+
+    sliders = {}
+    for param, (min_val, max_val, default) in slider_configs.items():
+        sliders[param] = create_slider(
+            min_val, max_val, default,
+            f"Page.Chat.Accordion.AdvancedSetting.Slider.{param}.label"
+        )
+
+    return sliders
+
+
+def setup_model_sync_events(chat_selector, completion_selector, chat_load_btn, completion_load_btn,
+                            chat_status, completion_status, chat_system_prompt, chat_max_tokens, completion_max_tokens):
+    chat_selector.select(
+        fn=lambda x: x,
+        inputs=[chat_selector],
+        outputs=[completion_selector]
+    )
+
+    completion_selector.select(
+        fn=lambda x: x,
+        inputs=[completion_selector],
+        outputs=[chat_selector]
+    )
+
+    chat_load_btn.click(
+        fn=chat_load_model_callback,
+        inputs=[chat_selector],
+        outputs=[chat_status, chat_system_prompt]
+    ).then(
+        fn=lambda x: x,
+        inputs=[chat_status],
+        outputs=[completion_status]
+    ).then(
+        fn=update_model_max_length,
+        inputs=[chat_max_tokens],
+        outputs=[chat_max_tokens]
+    ).then(
+        fn=update_model_max_length,
+        inputs=[completion_max_tokens],
+        outputs=[completion_max_tokens]
+    )
+
+    completion_load_btn.click(
+        fn=completion_load_model_callback,
+        inputs=[completion_selector],
+        outputs=[completion_status]
+    ).then(
+        fn=lambda x: x,
+        inputs=[completion_status],
+        outputs=[chat_status]
+    ).then(
+        fn=update_model_max_length,
+        inputs=[chat_max_tokens],
+        outputs=[chat_max_tokens]
+    ).then(
+        fn=update_model_max_length,
+        inputs=[completion_max_tokens],
+        outputs=[completion_max_tokens]
+    )
+
+
+def setup_model_management_events(local_form, api_form, model_list, chat_selector, completion_selector):
+    local_form['add_button'].click(
+        fn=add_model,
+        inputs=[
+            local_form['model_name'],
+            local_form['original_repo'],
+            local_form['mlx_repo'],
+            local_form['quantize'],
+            local_form['default_language'],
+            local_form['system_prompt'],
+            local_form['multimodal']
+        ]
+    ).then(
+        fn=update_model_management_models_list,
+        outputs=[model_list]
+    ).then(
+        fn=update_model_selector_choices,
+        outputs=[chat_selector]
+    ).then(
+        fn=update_model_selector_choices,
+        outputs=[completion_selector]
+    )
+
+    api_form['add_button'].click(
+        fn=add_api_model,
+        inputs=[
+            api_form['model_name'],
+            api_form['api_key'],
+            api_form['nick_name'],
+            api_form['base_url'],
+            api_form['system_prompt']
+        ]
+    ).then(
+        fn=update_model_management_models_list,
+        outputs=[model_list]
+    ).then(
+        fn=update_model_selector_choices,
+        outputs=[chat_selector]
+    ).then(
+        fn=update_model_selector_choices,
+        outputs=[completion_selector]
+    )
+
+
 with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     update_memory_usage_timer = gr.Timer(value=1, active=True)
+
+    chat_memory, chat_model_selector, chat_model_status, chat_load_button = create_model_controls()
+    chat_params = create_generation_params()
+
+    chat_system_prompt_textbox = gr.Textbox(
+        label=get_text("Page.Chat.ChatSystemPromptBlock.Textbox.system_prompt.label"),
+        placeholder=get_text("Page.Chat.ChatSystemPromptBlock.Textbox.system_prompt.placeholder"),
+        value=model_manager.get_system_prompt,
+        lines=3,
+        show_copy_button=True,
+        render=False,
+        scale=9
+    )
+
+    chat_default_system_prompt_button = gr.Button(
+        value=get_text("Page.Chat.ChatSystemPromptBlock.Button.default_system_prompt.value"),
+        render=False,
+        scale=1
+    )
+
+    chat_rag_not_implemented_markdown = gr.Markdown(
+        value=get_text("Page.Chat.Accordion.RAGSetting.Markdown.not_implemented"),
+        render=False
+    )
+
+    # 完成组件
+    completion_memory, completion_model_selector, completion_model_status, completion_load_button = create_model_controls()
+    completion_params = create_generation_params()
+
+    # 模型管理组件
+    local_model_form = {
+        'model_name': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.label",
+                                     "Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.placeholder"),
+        'original_repo': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.original_repo.label",
+                                        "Page.ModelManagement.AddLocalModelBlock.Textbox.original_repo.placeholder"),
+        'mlx_repo': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.mlx_repo.label",
+                                   "Page.ModelManagement.AddLocalModelBlock.Textbox.mlx_repo.placeholder"),
+        'quantize': gr.Dropdown(
+            label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.quantize.label"),
+            choices=["None", "4bit", "8bit", "bf16", "bf32"],
+            value="None",
+            interactive=True,
+            render=False
+        ),
+        'default_language': gr.Dropdown(
+            label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.default_language.label"),
+            choices=["multi"],
+            interactive=True,
+            render=False
+        ),
+        'system_prompt': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.default_system_prompt.label"),
+        'multimodal': gr.Dropdown(
+            label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.multimodal_ability.label"),
+            choices=["None", "vision"],
+            value="None",
+            multiselect=True,
+            render=False
+        ),
+        'add_button': gr.Button(
+            value=get_text("Page.ModelManagement.AddLocalModelBlock.Button.add.value"),
+            render=False
+        )
+    }
+
+    api_model_form = {
+        'model_name': create_textbox("Page.ModelManagement.AddAPIModelBlock.Textbox.model_name.label",
+                                     "Page.ModelManagement.AddAPIModelBlock.Textbox.model_name.placeholder"),
+        'nick_name': create_textbox("Page.ModelManagement.AddAPIModelBlock.Textbox.nick_name.label"),
+        'api_key': create_textbox("Page.ModelManagement.AddAPIModelBlock.Textbox.api_key.label",
+                                  "Page.ModelManagement.AddAPIModelBlock.Textbox.api_key.placeholder"),
+        'base_url': create_textbox("Page.ModelManagement.AddAPIModelBlock.Textbox.base_url.label",
+                                   "Page.ModelManagement.AddAPIModelBlock.Textbox.base_url.placeholder"),
+        'system_prompt': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.default_system_prompt.label"),
+        'add_button': gr.Button(
+            value=get_text("Page.ModelManagement.AddLocalModelBlock.Button.add.value"),
+            render=False
+        )
+    }
+
+    model_list = gr.Dataframe(
+        headers=[get_text("Page.ModelManagement.Dataframe.model_list.headers")],
+        value=update_model_management_models_list(),
+        datatype="str",
+        row_count=(10, "dynamic"),
+        render=False,
+        interactive=False
+    )
+
     update_memory_usage_timer.tick(
         fn=update_all_memory_usage,
-        outputs=[
-            chat_system_status_block.memory_usage_textbox,
-            completion_system_status_block.memory_usage_textbox
-        ]
+        outputs=[chat_memory, completion_memory]
     )
 
     gr.HTML("<h1>Chat with MLX</h1>")
@@ -1017,54 +1260,34 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         with gr.Row():
             with gr.Column(scale=2):
                 with gr.Row():
-                    chat_system_status_block.render_all()
+                    chat_memory.render()
 
                 with gr.Row():
                     gr.Markdown(f"## {get_text('Page.Chat.Markdown.configuration')}")
 
-                    chat_load_model_block.render_all()
-                    chat_load_model_block.model_selector_dropdown.select(
-                        fn=lambda x: x,
-                        inputs=[chat_load_model_block.model_selector_dropdown],
-                        outputs=[completion_load_model_block.model_selector_dropdown]
-                    )
-                    chat_load_model_block.load_model_button.click(
-                        fn=chat_load_model_callback,
-                        inputs=[chat_load_model_block.model_selector_dropdown],
-                        outputs=[
-                            chat_load_model_block.model_status_textbox,
-                            chat_system_prompt_block.system_prompt_textbox
-                        ]
-                    ).then(
-                        fn=lambda x: x,
-                        inputs=[chat_load_model_block.model_status_textbox],
-                        outputs=[completion_load_model_block.model_status_textbox]
-                    ).then(
-                        fn=update_model_max_length,
-                        inputs=[chat_advanced_setting_block.max_tokens_slider],
-                        outputs=[chat_advanced_setting_block.max_tokens_slider]
-                    ).then(
-                        fn=update_model_max_length,
-                        inputs=[completion_advanced_setting_block.max_tokens_slider],
-                        outputs=[completion_advanced_setting_block.max_tokens_slider]
-                    )
+                    chat_model_selector.render()
+                    chat_model_status.render()
+                    chat_load_button.render()
 
                 with gr.Accordion(label=get_text("Page.Chat.Accordion.AdvancedSetting.label"), open=False):
-                    chat_advanced_setting_block.render_all()
+                    for slider in chat_params.values():
+                        slider.render()
 
                 with gr.Accordion(label=get_text("Page.Chat.Accordion.RAGSetting.label"), open=False):
-                    chat_rag_setting_block.render_all()
+                    chat_rag_not_implemented_markdown.render()
 
             with gr.Column(scale=8):
                 with gr.Row(equal_height=True):
-                    chat_system_prompt_block.render_all()
-                    chat_system_prompt_block.default_system_prompt_button.click(
+                    chat_system_prompt_textbox.render()
+                    chat_default_system_prompt_button.render()
+
+                    chat_default_system_prompt_button.click(
                         fn=get_default_system_prompt_callback,
-                        outputs=[chat_system_prompt_block.system_prompt_textbox]
+                        outputs=[chat_system_prompt_textbox]
                     )
-                    chat_system_prompt_block.system_prompt_textbox.change(
+                    chat_system_prompt_textbox.change(
                         fn=model_manager.set_custom_prompt,
-                        inputs=[chat_system_prompt_block.system_prompt_textbox]
+                        inputs=[chat_system_prompt_textbox]
                     )
 
                 chatbot = gr.Chatbot(
@@ -1092,10 +1315,8 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                         {"left": "\\begin{vmatrix}", "right": "\\end{vmatrix}", "display": True},
                         {"left": "\\begin{Vmatrix}", "right": "\\end{Vmatrix}", "display": True},
                         {"left": "\\begin{CD}", "right": "\\end{CD}", "display": True},
-
                         {"left": "\\[", "right": "\\]", "display": True},
                         {"left": "$$", "right": "$$", "display": True},
-
                         {"left": "\\(", "right": "\\)", "display": False},
                         {"left": "$", "right": "$", "display": False}
                     ]
@@ -1108,84 +1329,41 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     fn=managed_chat_generator,
                     title=None,
                     autofocus=False,
-                    additional_inputs=[
-                        chat_system_prompt_block.system_prompt_textbox,
-                        chat_advanced_setting_block.temperature_slider,
-                        chat_advanced_setting_block.top_k_slider,
-                        chat_advanced_setting_block.top_p_slider,
-                        chat_advanced_setting_block.min_p_slider,
-                        chat_advanced_setting_block.max_tokens_slider,
-                        chat_advanced_setting_block.repetition_penalty_slider
-                    ]
+                    additional_inputs=[chat_system_prompt_textbox] + list(chat_params.values())
                 )
 
     with gr.Tab(get_text("Tab.completion"), interactive=True):
         with gr.Row():
             with gr.Column(scale=2):
-                completion_system_status_block.render_all()
+                completion_memory.render()
 
                 gr.Markdown(f"## {get_text('Page.Chat.Markdown.configuration')}")
 
-                completion_load_model_block.render_all()
-                completion_load_model_block.model_selector_dropdown.select(
-                    fn=lambda x: x,
-                    inputs=[completion_load_model_block.model_selector_dropdown],
-                    outputs=[chat_load_model_block.model_selector_dropdown]
-                )
-                completion_load_model_block.load_model_button.click(
-                    fn=completion_load_model_callback,
-                    inputs=[completion_load_model_block.model_selector_dropdown],
-                    outputs=[
-                        completion_load_model_block.model_status_textbox
-                    ]
-                ).then(
-                    fn=lambda x: x,
-                    inputs=[completion_load_model_block.model_status_textbox],
-                    outputs=[chat_load_model_block.model_status_textbox]
-                ).then(
-                    fn=update_model_max_length,
-                    inputs=[chat_advanced_setting_block.max_tokens_slider],
-                    outputs=[chat_advanced_setting_block.max_tokens_slider]
-                ).then(
-                    fn=update_model_max_length,
-                    inputs=[completion_advanced_setting_block.max_tokens_slider],
-                    outputs=[completion_advanced_setting_block.max_tokens_slider]
-                )
+                completion_model_selector.render()
+                completion_model_status.render()
+                completion_load_button.render()
 
                 with gr.Row(visible=False):
                     with gr.Accordion(label=get_text("Page.Chat.Accordion.AdvancedSetting.label"), open=True):
-                        completion_advanced_setting_block.render_all()
+                        for slider in completion_params.values():
+                            slider.render()
 
             with gr.Column(scale=8):
-                completion_textbox = gr.Textbox(lines=25, render=False)
                 completion_interface = gr.Interface(
                     clear_btn=None,
                     flagging_mode="never",
                     fn=managed_completion_generator,
                     inputs=[
-                        gr.Textbox(lines=10, show_copy_button=True, render=True, label=get_text("Page.Completion.Textbox.prompt.label")),
-                        completion_advanced_setting_block.temperature_slider,
-                        completion_advanced_setting_block.top_k_slider,
-                        completion_advanced_setting_block.top_p_slider,
-                        completion_advanced_setting_block.min_p_slider,
-                        completion_advanced_setting_block.max_tokens_slider,
-                        completion_advanced_setting_block.repetition_penalty_slider
-                    ],
+                               gr.Textbox(lines=10, show_copy_button=True, render=True,
+                                          label=get_text("Page.Completion.Textbox.prompt.label")),
+                           ] + list(completion_params.values()),
                     outputs=[
-                        gr.Textbox(lines=25, show_copy_button=True, render=True, label=get_text("Page.Completion.Textbox.output.label"))
+                        gr.Textbox(lines=25, show_copy_button=True, render=True,
+                                   label=get_text("Page.Completion.Textbox.output.label"))
                     ],
                     submit_btn=get_text("Page.Completion.Button.submit.value"),
                     stop_btn=get_text("Page.Completion.Button.stop.value"),
                 )
-
-    model_list = gr.Dataframe(
-        headers=[get_text("Page.ModelManagement.Dataframe.model_list.headers")],
-        value=update_model_management_models_list(),
-        datatype=["str"],
-        row_count=(10, "dynamic"),
-        render=False,
-        interactive=False
-    )
 
     with gr.Tab(get_text("Tab.model_management"), interactive=True):
         with gr.Row(equal_height=True):
@@ -1194,92 +1372,47 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
 
             with gr.Column(scale=5):
                 with gr.Tab(get_text("Page.ModelManagement.Tab.local_model")):
-                    model_management_add_local_model_block.render_all()
-                    model_management_add_local_model_block.add_button.click(
-                        fn=add_model,
-                        inputs=[
-                            model_management_add_local_model_block.model_name_textbox,
-                            model_management_add_local_model_block.original_repo_textbox,
-                            model_management_add_local_model_block.mlx_repo_textbox,
-                            model_management_add_local_model_block.quantize_dropdown,
-                            model_management_add_local_model_block.default_language_dropdown,
-                            model_management_add_local_model_block.default_system_prompt_textbox,
-                            model_management_add_local_model_block.multimodal_ability_dropdown
-                        ]
-                    ).then(
-                        fn=update_model_management_models_list,
-                        outputs=[
-                            model_list
-                        ]
-                    ).then(
-                        fn=update_model_selector_choices,
-                        outputs=[
-                            chat_load_model_block.model_selector_dropdown
-                        ]
-                    ).then(
-                        fn=update_model_selector_choices,
-                        outputs=[
-                            completion_load_model_block.model_selector_dropdown
-                        ]
-                    )
+                    for component in local_model_form.values():
+                        component.render()
 
                 with gr.Tab(get_text("Page.ModelManagement.Tab.openai_api")):
-                    model_management_add_api_model_block.render_all()
-                    model_management_add_api_model_block.add_button.click(
-                        fn=add_api_model,
-                        inputs=[
-                            model_management_add_api_model_block.model_name_textbox,
-                            model_management_add_api_model_block.api_key_textbox,
-                            model_management_add_api_model_block.nick_name_textbox,
-                            model_management_add_api_model_block.base_url_textbox,
-                            model_management_add_api_model_block.default_system_prompt_textbox
-                        ]
-                    ).then(
-                        fn=update_model_management_models_list,
-                        outputs=[
-                            model_list
-                        ]
-                    ).then(
-                        fn=update_model_selector_choices,
-                        outputs=[
-                            chat_load_model_block.model_selector_dropdown
-                        ]
-                    ).then(
-                        fn=update_model_selector_choices,
-                        outputs=[
-                            completion_load_model_block.model_selector_dropdown
-                        ]
-                    )
+                    for component in api_model_form.values():
+                        component.render()
 
+    setup_model_sync_events(
+        chat_model_selector, completion_model_selector,
+        chat_load_button, completion_load_button,
+        chat_model_status, completion_model_status,
+        chat_system_prompt_textbox,
+        chat_params['max_tokens'], completion_params['max_tokens']
+    )
+
+    setup_model_management_events(
+        local_model_form, api_model_form, model_list,
+        chat_model_selector, completion_model_selector
+    )
+
+    # 应用加载事件
     app.load(
         fn=update_model_management_models_list,
-        outputs=[
-            model_list
-        ]
+        outputs=[model_list]
     ).then(
         fn=update_model_selector_choices,
-        outputs=[
-            chat_load_model_block.model_selector_dropdown
-        ]
+        outputs=[chat_model_selector]
     ).then(
         fn=update_model_selector_choices,
-        outputs=[
-            completion_load_model_block.model_selector_dropdown
-        ]
+        outputs=[completion_model_selector]
     ).then(
         fn=update_model_max_length,
-        inputs=[chat_advanced_setting_block.max_tokens_slider],
-        outputs=[chat_advanced_setting_block.max_tokens_slider]
+        inputs=[chat_params['max_tokens']],
+        outputs=[chat_params['max_tokens']]
     ).then(
         fn=update_model_max_length,
-        inputs=[completion_advanced_setting_block.max_tokens_slider],
-        outputs=[completion_advanced_setting_block.max_tokens_slider]
+        inputs=[completion_params['max_tokens']],
+        outputs=[completion_params['max_tokens']]
     ).then(
         fn=update_all_memory_usage,
-        outputs=[
-            chat_system_status_block.memory_usage_textbox,
-            completion_system_status_block.memory_usage_textbox
-        ]
+        outputs=[chat_memory, completion_memory]
     )
 
 

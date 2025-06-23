@@ -14,9 +14,6 @@ MULTI_LANGUAGE = {
                 },
                 "SystemStatusBlock": {
                     "Textbox": {
-                        "device_name": {
-                            "label": "Device Name"
-                        },
                         "memory_usage": {
                             "label": "Memory Usage"
                         }

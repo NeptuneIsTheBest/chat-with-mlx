@@ -9,6 +9,7 @@ torchvision
 
 chromadb
 sentence-transformers
+langchain
 
 pypdf[full]
 python-docx
