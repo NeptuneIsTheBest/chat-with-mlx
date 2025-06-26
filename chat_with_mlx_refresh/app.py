@@ -10,9 +10,12 @@ import time
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Union
 
+import chromadb
 import gradio as gr
 from gradio.components.chatbot import ChatMessage
+from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pandas import DataFrame
+from sentence_transformers import SentenceTransformer
 
 from .language import get_text
 from .model import Message, MessageRole, ModelManager, TextModel, VisionModel, OpenAIModel
@@ -50,25 +53,25 @@ class FileManager:
         content = content.replace(boundary_end, '')
         return f"{boundary_start}\n{content}\n{boundary_end}"
 
-    def load_file(self, file_name: Path):
+    def load_file(self, file_name: Path, raw_content_only: bool = False):
         if file_name.name in self.files:
             if self.files[file_name.name]["md5"] == get_file_md5(file_name):
-                return self.files[file_name.name]["content"]
+                return self.files[file_name.name]["formatted_content"] if not raw_content_only else self.files[file_name.name]["content"]
         suffix = file_name.suffix.lower()
         if suffix == ".pdf":
-            return self.load_pdf(file_name)
+            return self.load_pdf(file_name, raw_content_only)
         elif suffix in [".txt", ".csv", ".md"]:
-            return self.load_txt_like(file_name)
+            return self.load_txt_like(file_name, raw_content_only)
         elif suffix == ".docx":
-            return self.load_docx(file_name)
+            return self.load_docx(file_name, raw_content_only)
         elif suffix == ".pptx":
-            return self.load_pptx(file_name)
+            return self.load_pptx(file_name, raw_content_only)
         elif suffix in [".xlsx", ".xls"]:
-            return self.load_excel(file_name)
+            return self.load_excel(file_name, raw_content_only)
         else:
             return None
 
-    def load_pdf(self, file_name: Path):
+    def load_pdf(self, file_name: Path, raw_content_only: bool = False):
         try:
             from pypdf import PdfReader
 
@@ -82,24 +85,26 @@ class FileManager:
             formatted_content = self.format_content(file_name, content)
             self.files[file_name.name] = {
                 "md5": get_file_md5(file_name),
-                "content": formatted_content
+                "formatted_content": formatted_content,
+                "content": content
             }
-            return formatted_content
+            return formatted_content if not raw_content_only else content
         except ImportError:
             logger.warning("pypdf not found.")
             return None
 
-    def load_txt_like(self, file_name: Path):
+    def load_txt_like(self, file_name: Path, raw_content_only: bool = False):
         with open(file_name, 'r', encoding='utf-8') as f:
             content = f.read()
         formatted_content = self.format_content(file_name, content)
         self.files[file_name.name] = {
             "md5": get_file_md5(file_name),
-            "content": formatted_content
+            "formatted_content": formatted_content,
+            "content": content
         }
-        return formatted_content
+        return formatted_content if not raw_content_only else content
 
-    def load_docx(self, file_name: Path):
+    def load_docx(self, file_name: Path, raw_content_only: bool = False):
         try:
             from docx import Document
 
@@ -108,14 +113,15 @@ class FileManager:
             formatted_content = self.format_content(file_name, content)
             self.files[file_name.name] = {
                 "md5": get_file_md5(file_name),
-                "content": formatted_content
+                "formatted_content": formatted_content,
+                "content": content
             }
-            return formatted_content
+            return formatted_content if not raw_content_only else content
         except ImportError:
             logger.warning("docx not found.")
             return None
 
-    def load_pptx(self, file_name: Path):
+    def load_pptx(self, file_name: Path, raw_content_only: bool = False):
         try:
             from pptx import Presentation
 
@@ -125,18 +131,19 @@ class FileManager:
                 for shape in slide.shapes:
                     if hasattr(shape, "text") and shape.text:
                         content_parts.append(shape.text)
-            content = "\n".join(content_parts)  # 使用换行符连接
+            content = "\n".join(content_parts)
             formatted_content = self.format_content(file_name, content)
             self.files[file_name.name] = {
                 "md5": get_file_md5(file_name),
-                "content": formatted_content
+                "formatted_content": formatted_content,
+                "content": content
             }
-            return formatted_content
+            return formatted_content if not raw_content_only else content
         except ImportError:
             logger.warning("pptx not found.")
             return None
 
-    def load_excel(self, file_name: Path):
+    def load_excel(self, file_name: Path, raw_content_only: bool = False):
         try:
             from pandas import ExcelFile, read_excel
             excel_file = ExcelFile(file_name)
@@ -151,15 +158,155 @@ class FileManager:
             formatted_content = self.format_content(file_name, content)
             self.files[file_name.name] = {
                 "md5": get_file_md5(file_name),
-                "content": formatted_content
+                "formatted_content": formatted_content,
+                "content": content
             }
-            return formatted_content
+            return formatted_content if not raw_content_only else content
         except ImportError:
             logger.warning("pandas not found.")
             return None
 
 
+class RAGManager:
+    def __init__(self, model_name: str = "all-MiniLM-L6-v2", persistence=False, db_path="./chromadb"):
+        if persistence:
+            self.client = chromadb.PersistentClient(db_path, settings=chromadb.Settings(anonymized_telemetry=False))
+        else:
+            self.client = chromadb.Client(settings=chromadb.Settings(anonymized_telemetry=False))
+
+        self.embedding_model = SentenceTransformer(model_name)
+        self.chunk_size = 1000
+        self.chunk_overlap = 200
+        self.n_results = 5
+        self.similarity_threshold = 0.0
+
+        self.text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=self.chunk_size,
+            chunk_overlap=self.chunk_overlap
+        )
+        self.collection = self.client.get_or_create_collection(
+            name="rag_collection",
+            metadata={"hnsw:space": "cosine"}
+        )
+        self.indexed_files = set()
+        self.enabled = False
+
+    def update_parameters(self,
+                          chunk_size: int = None,
+                          chunk_overlap: int = None,
+                          n_results: int = None,
+                          similarity_threshold: float = None):
+        updated = False
+
+        if chunk_size is not None and chunk_size != self.chunk_size:
+            self.chunk_size = chunk_size
+            updated = True
+
+        if chunk_overlap is not None and chunk_overlap != self.chunk_overlap:
+            self.chunk_overlap = chunk_overlap
+            updated = True
+
+        if n_results is not None:
+            self.n_results = n_results
+
+        if similarity_threshold is not None:
+            self.similarity_threshold = similarity_threshold
+
+        if updated:
+            self.text_splitter = RecursiveCharacterTextSplitter(
+                chunk_size=self.chunk_size,
+                chunk_overlap=self.chunk_overlap
+            )
+
+        return updated
+
+    def add_document(self, file_path: Path, file_content: str) -> Tuple[bool, str]:
+        if file_path.name in self.indexed_files:
+            return False, "Document '{}' is already indexed.".format(file_path.name)
+
+        chunks = self.text_splitter.split_text(file_content)
+        if not chunks:
+            return False, "No content to index in document '{}'.".format(file_path.name)
+
+        embeddings = self.embedding_model.encode(chunks, show_progress_bar=True)
+
+        ids = [f"{file_path.name}_{i}" for i in range(len(chunks))]
+        metadata = [{"source": file_path.name, "chunk_id": i} for i in range(len(chunks))]
+
+        self.collection.add(
+            embeddings=embeddings,
+            documents=chunks,
+            metadatas=metadata,
+            ids=ids
+        )
+        self.indexed_files.add(file_path.name)
+        return True, "Document '{}' indexed with {} chunks.".format(file_path.name, len(chunks))
+
+    def retrieve(self, query: str, n_results: int = None) -> str:
+        if self.collection.count() == 0:
+            return ""
+
+        results_count = n_results if n_results is not None else self.n_results
+
+        query_embeddings = self.embedding_model.encode([query])
+        results = self.collection.query(
+            query_embeddings=query_embeddings,
+            n_results=min(results_count, self.collection.count())
+        )
+
+        if not results or not results['documents'] or not results['documents'][0]:
+            return ""
+
+        filtered_docs = []
+        documents = results['documents'][0]
+        distances = results.get('distances', [None])[0] if 'distances' in results else [None] * len(documents)
+
+        for doc, distance in zip(documents, distances):
+            if distance is None or (1 - distance) >= self.similarity_threshold:
+                filtered_docs.append(doc)
+
+        if not filtered_docs:
+            return ""
+
+        retrieved_docs = "\n\n".join(filtered_docs)
+        return retrieved_docs
+
+    def clear_index(self):
+        count = self.collection.count()
+
+        if count > 0:
+            all_docs = self.collection.get()
+            if all_docs['ids']:
+                self.collection.delete(ids=all_docs['ids'])
+
+        self.indexed_files.clear()
+
+    def enable(self):
+        self.enabled = True
+
+    def disable(self):
+        self.enabled = False
+
+    def is_enabled(self) -> bool:
+        return self.enabled
+
+    def get_status(self) -> Tuple[bool, str]:
+        if not self.indexed_files:
+            return False, "RAG Index is empty."
+        total_chunks = self.collection.count()
+        return True, "Indexed {} documents with {} chunks.".format(len(self.indexed_files), total_chunks)
+
+    def get_parameters(self) -> Dict:
+        return {
+            "chunk_size": self.chunk_size,
+            "chunk_overlap": self.chunk_overlap,
+            "n_results": self.n_results,
+            "similarity_threshold": self.similarity_threshold
+        }
+
+
 file_manager = FileManager()
+rag_manager = RAGManager()
 
 
 def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]]:
@@ -248,7 +395,7 @@ def prepare_openai_message_content(text_input: Optional[str], file_paths: Option
                 continue
 
             suffix = file.suffix.lower()
-            if suffix in [".png", ".jpg", ".jpeg", ".heif", ".heic"]:  # Image
+            if suffix in [".png", ".jpg", ".jpeg", ".heif", ".heic"]:
                 try:
                     image_base64 = encode_image(file)
                     content_parts.append({"type": "image_url", "image_url": {"url": image_base64}})
@@ -364,7 +511,15 @@ def handle_chat(message: Dict,
                 min_p: float = 0.0,
                 max_tokens: int = 512,
                 repetition_penalty: float = 1.0,
+                rag_enabled: bool = False,
+                rag_n_results: int = 5,
                 stream: bool = True):
+    if rag_enabled and message.get("text"):
+        original_text = message.get("text", "")
+        enhanced_text = enhance_message_with_rag(original_text, rag_enabled, rag_n_results)
+        message = dict(message)
+        message["text"] = enhanced_text
+
     CHATML_CONTROL_TOKENS = [
         '<|im_start|>', '<|im_end|>',
         '<|system|>', '<|user|>', '<|assistant|>',
@@ -740,6 +895,8 @@ def managed_chat_generator(
         min_p: float = 0.0,
         max_tokens: int = 512,
         repetition_penalty: float = 1.0,
+        rag_enabled: bool = False,
+        rag_n_results: int = 5,
         stream: bool = True):
     g = handle_chat(
         message=message,
@@ -751,7 +908,9 @@ def managed_chat_generator(
         min_p=min_p,
         max_tokens=max_tokens,
         repetition_penalty=repetition_penalty,
-        stream=stream
+        rag_enabled=rag_enabled,
+        rag_n_results=rag_n_results,
+        stream=stream,
     )
 
     generation_stop_event.clear()
@@ -990,6 +1149,99 @@ def update_all_memory_usage() -> list[str]:
     return [memory_usage, memory_usage]
 
 
+def get_rag_enabled_status() -> bool:
+    return rag_manager.is_enabled()
+
+
+def get_rag_status() -> str:
+    return rag_manager.get_status()[1]
+
+
+def upload_and_index_file(files) -> Tuple[str, str]:
+    if not files:
+        return "No files selected.", get_rag_status()
+
+    results = []
+    for file_path in files:
+        try:
+            file_content = file_manager.load_file(Path(file_path), raw_content_only=True)
+            if file_content:
+                success, message = rag_manager.add_document(Path(file_path), file_content)
+                results.append(f"{Path(file_path).name}: {message}")
+            else:
+                results.append(f"{Path(file_path).name}: Failed to load content")
+        except Exception as e:
+            results.append(f"{Path(file_path).name}: Error - {str(e)}")
+
+    return "\n".join(results), get_rag_status()
+
+
+def clear_rag_index() -> Tuple[str, str]:
+    try:
+        rag_manager.clear_index()
+        return "RAG index cleared successfully.", get_rag_status()
+    except Exception as e:
+        return f"Error clearing RAG index: {str(e)}", get_rag_status()
+
+
+def toggle_rag_enabled(enabled: bool) -> str:
+    if enabled:
+        rag_manager.enable()
+        return "RAG enabled."
+    else:
+        rag_manager.disable()
+        return "RAG disabled."
+
+
+def update_rag_parameters(chunk_size: int, chunk_overlap: int, similarity_threshold: float) -> str:
+    try:
+        updated = rag_manager.update_parameters(
+            chunk_size=chunk_size,
+            chunk_overlap=chunk_overlap,
+            similarity_threshold=similarity_threshold
+        )
+
+        if updated:
+            return "RAG parameters updated. Consider re-indexing documents for optimal performance."
+        else:
+            return "RAG parameters updated."
+    except Exception as e:
+        return f"Error updating RAG parameters: {str(e)}"
+
+
+def get_rag_parameters() -> Tuple[int, int, int, float]:
+    params = rag_manager.get_parameters()
+    return (
+        params["chunk_size"],
+        params["chunk_overlap"],
+        params["n_results"],
+        params["similarity_threshold"]
+    )
+
+
+def enhance_message_with_rag(message_text: str, rag_enabled: bool, n_results: int = 5) -> str:
+    if not rag_enabled or not rag_manager.is_enabled():
+        return message_text
+
+    try:
+        retrieved_docs = rag_manager.retrieve(message_text, n_results=n_results)
+
+        if retrieved_docs:
+            enhanced_message = """
+            Based on the following relevant documents: {}
+
+            ---
+
+            User question: {}
+            """.format(retrieved_docs, message_text)
+            return enhanced_message
+        else:
+            return message_text
+    except Exception as e:
+        logger.error(f"Error in RAG retrieval: {e}")
+        return message_text
+
+
 def create_slider(min_val, max_val, default_val, label_key, **kwargs):
     return gr.Slider(
         minimum=min_val,
@@ -1062,6 +1314,51 @@ def create_generation_params():
         )
 
     return sliders
+
+
+def create_rag_params():
+    chunk_size, chunk_overlap, n_results, similarity_threshold = get_rag_parameters()
+
+    rag_params = {
+        'chunk_size': gr.Slider(
+            minimum=100,
+            maximum=2000,
+            value=chunk_size,
+            step=50,
+            label=get_text("Page.Chat.Accordion.RAGSetting.Slider.chunk_size.label"),
+            render=False,
+            interactive=True
+        ),
+        'chunk_overlap': gr.Slider(
+            minimum=0,
+            maximum=500,
+            value=chunk_overlap,
+            step=10,
+            label=get_text("Page.Chat.Accordion.RAGSetting.Slider.chunk_overlap.label"),
+            render=False,
+            interactive=True
+        ),
+        'n_results': gr.Slider(
+            minimum=1,
+            maximum=10,
+            value=n_results,
+            step=1,
+            label=get_text("Page.Chat.Accordion.RAGSetting.Slider.n_results.label"),
+            render=False,
+            interactive=True
+        ),
+        'similarity_threshold': gr.Slider(
+            minimum=0.0,
+            maximum=1.0,
+            value=similarity_threshold,
+            step=0.05,
+            label=get_text("Page.Chat.Accordion.RAGSetting.Slider.similarity_threshold.label"),
+            render=False,
+            interactive=True
+        )
+    }
+
+    return rag_params
 
 
 def setup_model_sync_events(chat_selector, completion_selector, chat_load_btn, completion_load_btn,
@@ -1164,6 +1461,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
 
     chat_memory, chat_model_selector, chat_model_status, chat_load_button = create_model_controls()
     chat_params = create_generation_params()
+    rag_params = create_rag_params()
 
     chat_system_prompt_textbox = gr.Textbox(
         label=get_text("Page.Chat.ChatSystemPromptBlock.Textbox.system_prompt.label"),
@@ -1181,16 +1479,39 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         scale=1
     )
 
-    chat_rag_not_implemented_markdown = gr.Markdown(
-        value=get_text("Page.Chat.Accordion.RAGSetting.Markdown.not_implemented"),
-        render=False
-    )
+    chat_rag_form = {
+        'rag_enabled': gr.Checkbox(
+            label=get_text("Page.Chat.Accordion.RAGSetting.Checkbox.rag_enabled.label"),
+            value=get_rag_enabled_status,
+            interactive=True,
+            render=False
+        ),
+        'file_upload': gr.File(
+            label=get_text("Page.Chat.Accordion.RAGSetting.File.file_upload.label"),
+            file_count="multiple",
+            file_types=[".txt", ".pdf", ".docx", ".pptx", ".xlsx", ".xls", ".md", ".csv"],
+            render=False
+        ),
+        'upload_button': gr.Button(
+            value=get_text("Page.Chat.Accordion.RAGSetting.Button.upload.value"),
+            render=False
+        ),
+        'clear_button': gr.Button(
+            value=get_text("Page.Chat.Accordion.RAGSetting.Button.clear.value"),
+            render=False
+        ),
+        'upload_status': create_textbox("Page.Chat.Accordion.RAGSetting.Textbox.upload_status.label", interactive=False, render=False),
+        'rag_status': create_textbox("Page.Chat.Accordion.RAGSetting.Textbox.rag_status.label", interactive=False, render=False),
+        'update_params_button': gr.Button(
+            value=get_text("Page.Chat.Accordion.RAGSetting.Button.update_params.value"),
+            render=False
+        ),
+        'params_status': create_textbox("Page.Chat.Accordion.RAGSetting.Textbox.params_status.label", interactive=False, render=False)
+    }
 
-    # 完成组件
     completion_memory, completion_model_selector, completion_model_status, completion_load_button = create_model_controls()
     completion_params = create_generation_params()
 
-    # 模型管理组件
     local_model_form = {
         'model_name': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.label",
                                      "Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.placeholder"),
@@ -1274,7 +1595,29 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                         slider.render()
 
                 with gr.Accordion(label=get_text("Page.Chat.Accordion.RAGSetting.label"), open=False):
-                    chat_rag_not_implemented_markdown.render()
+                    chat_rag_form['rag_enabled'].render()
+                    chat_rag_form['rag_status'].render()
+
+                    with gr.Row():
+                        chat_rag_form['file_upload'].render()
+
+                    with gr.Row():
+                        chat_rag_form['upload_button'].render()
+                        chat_rag_form['clear_button'].render()
+
+                    chat_rag_form['upload_status'].render()
+
+                    with gr.Group():
+                        with gr.Row():
+                            rag_params['chunk_size'].render()
+                            rag_params['chunk_overlap'].render()
+
+                        with gr.Row():
+                            rag_params['n_results'].render()
+                            rag_params['similarity_threshold'].render()
+
+                        chat_rag_form['update_params_button'].render()
+                        chat_rag_form['params_status'].render()
 
             with gr.Column(scale=8):
                 with gr.Row(equal_height=True):
@@ -1329,7 +1672,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     fn=managed_chat_generator,
                     title=None,
                     autofocus=False,
-                    additional_inputs=[chat_system_prompt_textbox] + list(chat_params.values())
+                    additional_inputs=[chat_system_prompt_textbox] + list(chat_params.values()) + [chat_rag_form['rag_enabled'], rag_params['n_results']]
                 )
 
     with gr.Tab(get_text("Tab.completion"), interactive=True):
@@ -1392,7 +1735,33 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         chat_model_selector, completion_model_selector
     )
 
-    # 应用加载事件
+    chat_rag_form['rag_enabled'].change(
+        fn=toggle_rag_enabled,
+        inputs=[chat_rag_form['rag_enabled']],
+        outputs=[chat_rag_form['upload_status']]
+    )
+
+    chat_rag_form['upload_button'].click(
+        fn=upload_and_index_file,
+        inputs=[chat_rag_form['file_upload']],
+        outputs=[chat_rag_form['upload_status'], chat_rag_form['rag_status']]
+    )
+
+    chat_rag_form['clear_button'].click(
+        fn=clear_rag_index,
+        outputs=[chat_rag_form['upload_status'], chat_rag_form['rag_status']]
+    )
+
+    chat_rag_form['update_params_button'].click(
+        fn=update_rag_parameters,
+        inputs=[
+            rag_params['chunk_size'],
+            rag_params['chunk_overlap'],
+            rag_params['similarity_threshold']
+        ],
+        outputs=[chat_rag_form['params_status']]
+    )
+
     app.load(
         fn=update_model_management_models_list,
         outputs=[model_list]
@@ -1413,6 +1782,9 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     ).then(
         fn=update_all_memory_usage,
         outputs=[chat_memory, completion_memory]
+    ).then(
+        fn=get_rag_status,
+        outputs=[chat_rag_form['rag_status']]
     )
 
 

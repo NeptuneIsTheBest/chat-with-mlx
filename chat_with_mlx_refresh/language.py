@@ -79,8 +79,51 @@ MULTI_LANGUAGE = {
                     },
                     "RAGSetting": {
                         "label": "RAG Setting",
-                        "Markdown": {
-                            "not_implemented": "Not implemented yet."
+                        "Button": {
+                            "upload": {
+                                "value": "Upload File"
+                            },
+                            "clear": {
+                                "value": "Clear Index"
+                            },
+                            "update_params": {
+                                "value": "Update RAG parameters"
+                            }
+                        },
+                        "Checkbox": {
+                            "rag_enabled": {
+                                "label": "Enable RAG"
+                            }
+                        },
+                        "File": {
+                            "file_upload": {
+                                "label": "File Upload"
+                            }
+                        },
+                        "Slider": {
+                            "chunk_size": {
+                                "label": "Chunk Size"
+                            },
+                            "chunk_overlap": {
+                                "label": "Chunk Overlap"
+                            },
+                            "n_results": {
+                                "label": "Number of results"
+                            },
+                            "similarity_threshold": {
+                                "label": "Similarity Threshold"
+                            }
+                        },
+                        "Textbox": {
+                            "upload_status": {
+                                "label": "Upload Status"
+                            },
+                            "rag_status": {
+                                "label": "RAG Status"
+                            },
+                            "params_status": {
+                                "label": "Parameters update status"
+                            }
                         }
                     }
                 }

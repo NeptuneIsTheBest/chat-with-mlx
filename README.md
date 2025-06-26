@@ -57,7 +57,9 @@ That's it! Open http://127.0.0.1:7860 in your browser and start chatting! 🎉
 * [x] Chat
 * [x] Completion
 * [x] Model Management
-* [ ] RAG
+* [x] RAG
+* [ ] Function Call
+* [ ] MCP 
 
 ### Others
 
