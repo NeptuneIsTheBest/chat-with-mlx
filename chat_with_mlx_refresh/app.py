@@ -166,6 +166,9 @@ class FileManager:
             logger.warning("pandas not found.")
             return None
 
+    def clear(self):
+        self.files.clear()
+
 
 class RAGManager:
     def __init__(self, model_name: str = "all-MiniLM-L6-v2", persistence=False, db_path="./chromadb"):
@@ -262,7 +265,8 @@ class RAGManager:
         distances = results.get('distances', [None])[0] if 'distances' in results else [None] * len(documents)
 
         for doc, distance in zip(documents, distances):
-            if distance is None or (1 - distance) >= self.similarity_threshold:
+            similarity = distance if distance is not None else 0
+            if similarity >= self.similarity_threshold:
                 filtered_docs.append(doc)
 
         if not filtered_docs:
@@ -1220,7 +1224,7 @@ def get_rag_parameters() -> Tuple[int, int, int, float]:
 
 
 def enhance_message_with_rag(message_text: str, rag_enabled: bool, n_results: int = 5) -> str:
-    if not rag_enabled or not rag_manager.is_enabled():
+    if not rag_enabled:
         return message_text
 
     try:
@@ -1455,6 +1459,10 @@ def setup_model_management_events(local_form, api_form, model_list, chat_selecto
         outputs=[completion_selector]
     )
 
+def clear_cache():
+    file_manager.clear()
+    model_manager.close_active_generator()
+
 
 with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     update_memory_usage_timer = gr.Timer(value=1, active=True)
@@ -1663,6 +1671,10 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                         {"left": "\\(", "right": "\\)", "display": False},
                         {"left": "$", "right": "$", "display": False}
                     ]
+                )
+
+                chatbot.clear(
+                    fn=clear_cache
                 )
 
                 gr.ChatInterface(
