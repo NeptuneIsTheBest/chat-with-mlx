@@ -265,8 +265,7 @@ class RAGManager:
         distances = results.get('distances', [None])[0] if 'distances' in results else [None] * len(documents)
 
         for doc, distance in zip(documents, distances):
-            similarity = distance if distance is not None else 0
-            if similarity >= self.similarity_threshold:
+            if distance is not None and distance <= self.similarity_threshold:
                 filtered_docs.append(doc)
 
         if not filtered_docs:
@@ -276,13 +275,11 @@ class RAGManager:
         return retrieved_docs
 
     def clear_index(self):
-        count = self.collection.count()
-
-        if count > 0:
-            all_docs = self.collection.get()
-            if all_docs['ids']:
-                self.collection.delete(ids=all_docs['ids'])
-
+        self.client.delete_collection(name=self.collection.name)
+        self.collection = self.client.get_or_create_collection(
+            name="rag_collection",
+            metadata={"hnsw:space": "cosine"}
+        )
         self.indexed_files.clear()
 
     def enable(self):
@@ -1458,6 +1455,7 @@ def setup_model_management_events(local_form, api_form, model_list, chat_selecto
         fn=update_model_selector_choices,
         outputs=[completion_selector]
     )
+
 
 def clear_cache():
     stop_generation()
