@@ -1460,6 +1460,7 @@ def setup_model_management_events(local_form, api_form, model_list, chat_selecto
     )
 
 def clear_cache():
+    stop_generation()
     file_manager.clear()
     model_manager.close_active_generator()
 
@@ -1476,6 +1477,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         placeholder=get_text("Page.Chat.ChatSystemPromptBlock.Textbox.system_prompt.placeholder"),
         value=model_manager.get_system_prompt,
         lines=3,
+        max_lines=5,
         show_copy_button=True,
         render=False,
         scale=9
@@ -1583,7 +1585,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         outputs=[chat_memory, completion_memory]
     )
 
-    gr.HTML("<h1>Chat with MLX</h1>")
+    gr.HTML("<h2>Chat with MLX</h2>")
 
     with gr.Tab(get_text("Tab.chat")):
         with gr.Row():
@@ -1599,8 +1601,9 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     chat_load_button.render()
 
                 with gr.Accordion(label=get_text("Page.Chat.Accordion.AdvancedSetting.label"), open=False):
-                    for slider in chat_params.values():
-                        slider.render()
+                    with gr.Group():
+                        for slider in chat_params.values():
+                            slider.render()
 
                 with gr.Accordion(label=get_text("Page.Chat.Accordion.RAGSetting.label"), open=False):
                     chat_rag_form['rag_enabled'].render()
@@ -1624,8 +1627,8 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                             rag_params['n_results'].render()
                             rag_params['similarity_threshold'].render()
 
-                        chat_rag_form['update_params_button'].render()
-                        chat_rag_form['params_status'].render()
+                    chat_rag_form['update_params_button'].render()
+                    chat_rag_form['params_status'].render()
 
             with gr.Column(scale=8):
                 with gr.Row(equal_height=True):
@@ -1684,6 +1687,9 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     fn=managed_chat_generator,
                     title=None,
                     autofocus=False,
+                    fill_height=True,
+                    fill_width=True,
+                    save_history=True,
                     additional_inputs=[chat_system_prompt_textbox] + list(chat_params.values()) + [chat_rag_form['rag_enabled'], rag_params['n_results']]
                 )
 
