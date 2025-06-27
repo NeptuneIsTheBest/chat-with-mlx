@@ -265,7 +265,7 @@ class RAGManager:
         distances = results.get('distances', [None])[0] if 'distances' in results else [None] * len(documents)
 
         for doc, distance in zip(documents, distances):
-            if distance is not None and distance <= self.similarity_threshold:
+            if distance is not None and distance >= self.similarity_threshold:
                 filtered_docs.append(doc)
 
         if not filtered_docs:
