@@ -67,11 +67,13 @@ class TextModel(BaseLocalModel):
     def __init__(self, model_path: str):
         self.model = None
         self.tokenizer = None
+        self.max_position_embeddings = None
         super().__init__(model_path)
 
     def load(self) -> None:
         try:
             self.model, self.tokenizer = load(self.model_path)
+            self.max_position_embeddings = self.model.model.args.max_position_embeddings
         except Exception as e:
             raise RuntimeError(f"Failed to load text model {self.model_path}: {e}")
 
@@ -127,14 +129,14 @@ class VisionModel(BaseLocalModel):
         self.config = None
         self.model = None
         self.processor = None
-        self.image_processor = None
+        self.max_position_embeddings = None
         super().__init__(model_path)
 
     def load(self) -> None:
         try:
             self.config = mlx_vlm.utils.load_config(self.model_path)
             self.model, self.processor = mlx_vlm.load(self.model_path, processor_config={"trust_remote_code": True})
-            self.image_processor = mlx_vlm.utils.load_image_processor(self.model_path)
+            self.max_position_embeddings = self.model.config.text_config.max_position_embeddings
         except Exception as e:
             raise RuntimeError(f"Failed to load vision model {self.model_path}: {e}")
 
@@ -161,20 +163,18 @@ class VisionModel(BaseLocalModel):
         gen_args = {
             "model": self.model,
             "processor": self.processor,
-            "image_processor": self.image_processor,
             "prompt": prompt,
             **gen_params,
         }
 
         if stream:
-            return mlx_vlm.utils.stream_generate(**gen_args)
+            return mlx_vlm.stream_generate(**gen_args)
         else:
-            return mlx_vlm.utils.generate(**gen_args)
+            return mlx_vlm.generate(**gen_args).text
 
     def close(self) -> None:
         del self.model
         del self.processor
-        del self.image_processor
         del self.config
         gc.collect()
         mlx.core.clear_cache()
@@ -216,7 +216,7 @@ class MemoryUsageLevel(enum.Enum):
 
 
 class ModelManager:
-    VALID_QUANTIZE_TYPES = frozenset({"None", "4bit", "8bit", "bf16", "bf32"})
+    VALID_QUANTIZE_TYPES = frozenset({"None", "2bit", "3bit", "4bit", "6bit", "8bit", "bf16", "bf32"})
     VALID_LANGUAGES = frozenset({"multi"})
     VALID_MULTIMODAL_ABILITIES = frozenset({"None", "vision"})
     CONFIG_EXTENSION = ".json"
