@@ -48,6 +48,7 @@ That's it! Open http://127.0.0.1:7860 in your browser and start chatting! 🎉
 * Phi-4-reasoning
 * DeepSeek-R1-0528
 * Gemma3
+* Gemma3n
 * and so on...
 
 ## Roadmap

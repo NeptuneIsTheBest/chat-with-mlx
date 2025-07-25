@@ -1116,7 +1116,9 @@ def update_model_max_length(slider_value: Union[int, float]):
             if isinstance(model, OpenAIModel):
                 return update_slider_config(1, 1048576, slider_value)
             try:
-                model_max_length = model.tokenizer.model_max_length
+                model_max_length = 32768
+                if isinstance(model, TextModel) or isinstance(model, VisionModel):
+                    model_max_length = model.max_position_embeddings
                 if model_max_length is None or model_max_length <= 0:
                     model_max_length = 32768
             except Exception as e:
@@ -1529,7 +1531,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                                    "Page.ModelManagement.AddLocalModelBlock.Textbox.mlx_repo.placeholder"),
         'quantize': gr.Dropdown(
             label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.quantize.label"),
-            choices=["None", "4bit", "8bit", "bf16", "bf32"],
+            choices=["None", "2bit", "3bit", "4bit", "6bit", "8bit", "bf16", "bf32"],
             value="None",
             interactive=True,
             render=False
