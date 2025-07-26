@@ -2,6 +2,7 @@ import argparse
 import atexit
 import base64
 import copy
+import gc
 import hashlib
 import logging
 import re
@@ -177,7 +178,8 @@ class RAGManager:
         else:
             self.client = chromadb.Client(settings=chromadb.Settings(anonymized_telemetry=False))
 
-        self.embedding_model = SentenceTransformer(model_name)
+        self.model_name = model_name
+        self.embedding_model = None
         self.chunk_size = 1000
         self.chunk_overlap = 200
         self.n_results = 5
@@ -283,6 +285,8 @@ class RAGManager:
         self.indexed_files.clear()
 
     def enable(self):
+        if self.embedding_model is None:
+            self.embedding_model = SentenceTransformer(self.model_name)
         self.enabled = True
 
     def disable(self):

@@ -29,6 +29,48 @@ class Message:
         return {"role": self.role.value, "content": self.content}
 
 
+def get_model_max_length(model, tokenizer=None, config=None) -> int:
+    max_len = None
+
+    if config:
+        if hasattr(config, "text_config"):
+            max_len = getattr(config.text_config, "max_position_embeddings", None)
+
+        if not max_len:
+            max_len = getattr(config, "max_position_embeddings", None)
+
+        if not max_len:
+            max_len = getattr(config, "sliding_window", None)
+
+        if not max_len:
+            max_len = getattr(config, "max_sequence_length", None)
+
+    if not max_len and tokenizer and hasattr(tokenizer, "model_max_length"):
+        if tokenizer.model_max_length < 1e6:
+            max_len = tokenizer.model_max_length
+
+    if not max_len and hasattr(model, "config"):
+            max_len = getattr(model.config, "max_position_embeddings", None)
+    if not max_len and hasattr(model, "args"):
+        max_len = getattr(model.args, "max_position_embeddings", None)
+        if not max_len and hasattr(model.args, "text_config"):
+            if isinstance(model.args.text_config, dict):
+                max_len = model.args.text_config.get("max_position_embeddings", None)
+            else:
+                max_len = getattr(model.args.text_config, "max_position_embeddings", None)
+        if not max_len:
+            max_len = getattr(model.args, "sliding_window", None)
+    if not max_len and hasattr(model, "text_config"):
+        max_len = getattr(model.text_config, "max_position_embeddings", None)
+
+    if not max_len:
+        default_max_len = 32768
+        logging.warning("Could not determine model's max length. Falling back to default: {}".format(default_max_len))
+        return default_max_len
+
+    return max_len
+
+
 class BaseLocalModel(ABC):
     def __init__(self, model_path: str):
         self.model_path = model_path
@@ -73,9 +115,14 @@ class TextModel(BaseLocalModel):
     def load(self) -> None:
         try:
             self.model, self.tokenizer = load(self.model_path)
-            self.max_position_embeddings = self.model.model.args.max_position_embeddings
         except Exception as e:
             raise RuntimeError(f"Failed to load text model {self.model_path}: {e}")
+
+        try:
+            self.max_position_embeddings = get_model_max_length(self.model, self.tokenizer, None)
+        except Exception as e:
+            self.max_position_embeddings = None
+            logging.warning(f"Failed to read model max position embeddings {self.model_path}: {e}")
 
     def format_chat_prompt(self, message: Dict, history: List[Dict], **kwargs) -> str:
         conversation = history + [message]
@@ -136,9 +183,14 @@ class VisionModel(BaseLocalModel):
         try:
             self.config = mlx_vlm.utils.load_config(self.model_path)
             self.model, self.processor = mlx_vlm.load(self.model_path, processor_config={"trust_remote_code": True})
-            self.max_position_embeddings = self.model.config.text_config.max_position_embeddings
         except Exception as e:
             raise RuntimeError(f"Failed to load vision model {self.model_path}: {e}")
+
+        try:
+            self.max_position_embeddings = get_model_max_length(self.model, self.processor, self.config)
+        except Exception as e:
+            self.max_position_embeddings = None
+            logging.warning(f"Failed to read model max position embeddings {self.model_path}: {e}")
 
     def format_chat_prompt(self, message: Dict, history: List[Dict], **kwargs) -> str:
         conversation = history + [message]
