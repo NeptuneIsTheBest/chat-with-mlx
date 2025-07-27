@@ -525,6 +525,8 @@ class ModelManager:
             logging.info(f"Successfully loaded model: {model_name}")
 
         except Exception as e:
+            self.close_model()
+
             logging.error(f"Error loading model '{model_name}': {e}")
             raise RuntimeError(f"Error loading model '{model_name}': {e}")
 
@@ -568,12 +570,12 @@ class ModelManager:
                 self.model.close()
             except Exception as e:
                 logging.error(f"Error closing model: {e}")
-            finally:
-                self.model = None
-                self.model_config = None
 
-            gc.collect()
-            mlx.core.clear_cache()
+        self.model = None
+        self.model_config = None
+
+        gc.collect()
+        mlx.core.clear_cache()
 
     def get_loaded_model(self) -> Optional[Union['BaseLocalModel', 'OpenAIModel']]:
         return self.model

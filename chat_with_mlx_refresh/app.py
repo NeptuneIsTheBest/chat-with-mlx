@@ -2,7 +2,6 @@ import argparse
 import atexit
 import base64
 import copy
-import gc
 import hashlib
 import logging
 import re
