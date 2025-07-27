@@ -30,45 +30,43 @@ class Message:
 
 
 def get_model_max_length(model, tokenizer=None, config=None) -> int:
-    max_len = None
-
+    search_paths = []
     if config:
-        if hasattr(config, "text_config"):
-            max_len = getattr(config.text_config, "max_position_embeddings", None)
+        search_paths.extend([
+            (config, "text_config.max_position_embeddings"),
+            (config, "max_position_embeddings"),
+            (config, "sliding_window"),
+            (config, "max_sequence_length"),
+        ])
+    if tokenizer and hasattr(tokenizer, "model_max_length") and tokenizer.model_max_length < 1e6:
+        return tokenizer.model_max_length
 
-        if not max_len:
-            max_len = getattr(config, "max_position_embeddings", None)
+    search_paths.extend([
+        (model, "config.max_position_embeddings"),
+        (model, "args.max_position_embeddings"),
+        (model, "args.text_config.max_position_embeddings"),
+        (model, "args.sliding_window"),
+        (model, "text_config.max_position_embeddings"),
+    ])
 
-        if not max_len:
-            max_len = getattr(config, "sliding_window", None)
+    for obj, path in search_paths:
+        current_obj = obj
+        try:
+            for attr in path.split('.'):
+                if isinstance(current_obj, dict):
+                    current_obj = current_obj.get(attr)
+                else:
+                    current_obj = getattr(current_obj, attr)
+                if current_obj is None:
+                    break
+            if current_obj is not None:
+                return int(current_obj)
+        except (AttributeError, TypeError):
+            continue
 
-        if not max_len:
-            max_len = getattr(config, "max_sequence_length", None)
-
-    if not max_len and tokenizer and hasattr(tokenizer, "model_max_length"):
-        if tokenizer.model_max_length < 1e6:
-            max_len = tokenizer.model_max_length
-
-    if not max_len and hasattr(model, "config"):
-            max_len = getattr(model.config, "max_position_embeddings", None)
-    if not max_len and hasattr(model, "args"):
-        max_len = getattr(model.args, "max_position_embeddings", None)
-        if not max_len and hasattr(model.args, "text_config"):
-            if isinstance(model.args.text_config, dict):
-                max_len = model.args.text_config.get("max_position_embeddings", None)
-            else:
-                max_len = getattr(model.args.text_config, "max_position_embeddings", None)
-        if not max_len:
-            max_len = getattr(model.args, "sliding_window", None)
-    if not max_len and hasattr(model, "text_config"):
-        max_len = getattr(model.text_config, "max_position_embeddings", None)
-
-    if not max_len:
-        default_max_len = 32768
-        logging.warning("Could not determine model's max length. Falling back to default: {}".format(default_max_len))
-        return default_max_len
-
-    return max_len
+    default_max_len = 32768
+    logging.warning(f"Could not determine model's max length. Falling back to default: {default_max_len}")
+    return default_max_len
 
 
 class BaseLocalModel(ABC):
@@ -654,13 +652,20 @@ class ModelManager:
         self.active_generator.append(gen)
 
     def close_active_generator(self) -> None:
-        if self.active_generator:
-            try:
-                for gen in self.active_generator:
-                    gen.close()
-                    self.active_generator.remove(gen)
+        if not self.active_generator:
+            return
 
-                    gc.collect()
-                    mlx.core.clear_cache()
+        successfully_closed = []
+        for gen in list(self.active_generator):
+            try:
+                gen.close()
+                successfully_closed.append(gen)
             except Exception as e:
-                logging.info(f"Failed to close active generator: {e}")
+                logging.warning(f"Failed to close generator {gen}: {e}")
+
+        for gen in successfully_closed:
+            if gen in self.active_generator:
+                self.active_generator.remove(gen)
+
+        gc.collect()
+        mlx.core.clear_cache()
