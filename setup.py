@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="chat-with-mlx-refresh",
-    version="0.1.20",
+    version="0.1.21",
     author="NeptuneIsTheBest",
     author_email="13058097081a@gmail.com",
     description="An all-in-one chat Web UI based on the MLX framework, designed for Apple Silicon.",
