@@ -1,7 +1,7 @@
 gradio >= 5.34.0
 
-mlx == 0.26.5
-mlx-lm >= 0.26.0
+mlx >= 0.27.1
+mlx-lm >= 0.26.2
 mlx-vlm >= 0.3.2
 
 torch
