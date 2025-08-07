@@ -1,11 +1,13 @@
-gradio >= 5.34.0
+gradio >= 5.41.1
 
-mlx >= 0.27.1
-mlx-lm >= 0.26.2
+mlx >= 0.28.0
+mlx-lm >= 0.26.3
 mlx-vlm >= 0.3.2
 
-torch
-torchvision
+tiktoken
+
+torch >= 2.8.0
+torchvision >= 0.23.0
 
 chromadb
 sentence-transformers

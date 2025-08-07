@@ -112,7 +112,7 @@ class TextModel(BaseLocalModel):
 
     def load(self) -> None:
         try:
-            self.model, self.tokenizer = load(self.model_path)
+            self.model, self.tokenizer = load(self.model_path, tokenizer_config={"trust_remote_code": True})
         except Exception as e:
             raise RuntimeError(f"Failed to load text model {self.model_path}: {e}")
 

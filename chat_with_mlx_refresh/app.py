@@ -548,6 +548,9 @@ def handle_chat(message: Dict,
 
         return filtered_text, should_stop
 
+    def filter_answer_tags(text: str) -> str:
+        return text.replace('<answer>', '').replace('</answer>', '')
+
     try:
         model = get_loaded_model()
 
@@ -574,7 +577,8 @@ def handle_chat(message: Dict,
                             chunk_text = ''.join([chunk_buffer, delta.content])
                             chunk_buffer = ""
 
-                            for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think"]:
+                            for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think", "<a", "<an", "<ans", "<answ", "<answe", "<answer", "</a", "</an", "</ans", "</answ", "</answe",
+                                            "</answer"]:
                                 if chunk_text.endswith(partial):
                                     chunk_buffer = partial
                                     chunk_text = chunk_text[:-len(partial)]
@@ -584,6 +588,7 @@ def handle_chat(message: Dict,
                                 continue
 
                             chunk_text, should_stop = filter_chatml_tokens(chunk_text)
+                            chunk_text = filter_answer_tags(chunk_text)
 
                             if should_stop:
                                 if in_thinking:
@@ -676,6 +681,7 @@ def handle_chat(message: Dict,
                     full_content = response_stream.choices[0].message.content
 
                     full_content, _ = filter_chatml_tokens(full_content)
+                    full_content = filter_answer_tags(full_content)
 
                     think_match = re.search(r'<think>(.*?)</think>', full_content, re.DOTALL)
                     if think_match:
@@ -769,7 +775,7 @@ def handle_chat(message: Dict,
                     chunk_text = ''.join([chunk_buffer, chunk_text])
                     chunk_buffer = ""
 
-                    for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think"]:
+                    for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think", "<a", "<an", "<ans", "<answ", "<answe", "<answer", "</a", "</an", "</ans", "</answ", "</answe", "</answer"]:
                         if chunk_text.endswith(partial):
                             chunk_buffer = partial
                             chunk_text = chunk_text[:-len(partial)]
@@ -779,6 +785,7 @@ def handle_chat(message: Dict,
                         continue
 
                     chunk_text, should_stop = filter_chatml_tokens(chunk_text)
+                    chunk_text = filter_answer_tags(chunk_text)
 
                     if should_stop:
                         if in_thinking:
