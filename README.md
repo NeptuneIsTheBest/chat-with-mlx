@@ -59,8 +59,10 @@ That's it! Open http://127.0.0.1:7860 in your browser and start chatting! 🎉
 * [x] Completion
 * [x] Model Management
 * [x] RAG
-* [ ] Function Call
-* [ ] MCP 
+* [x] Function Call
+* [ ] MCP
+
+We currently support single Function Calling and may support multiple Function Calling in the future.
 
 ### Others
 
