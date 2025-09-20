@@ -11,7 +11,6 @@ import mlx
 import mlx_vlm
 from mlx_lm import load, generate, stream_generate, sample_utils
 from mlx_lm.generate import GenerationResponse
-from openai import OpenAI
 
 
 class MessageRole(enum.Enum):
@@ -230,33 +229,8 @@ class VisionModel(BaseLocalModel):
         mlx.core.clear_cache()
 
 
-class OpenAIModel:
-    def __init__(self, api_key: str, model_name: str, base_url: str = None):
-        self.api_key = api_key
-        self.model_name = model_name
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
-
-        try:
-            self.client.models.retrieve(self.model_name)
-        except Exception as e:
-            raise RuntimeError(f"Failed to connect to or find model {self.model_name}: {e}")
-
-    def generate_response(self, messages: List[Dict], stream: bool = False, **kwargs: Any) -> Any:
-        return self.client.chat.completions.create(
-            model=self.model_name,
-            messages=messages,
-            stream=stream,
-            **kwargs
-        )
-
-    def close(self):
-        del self.client
-        del self.api_key
-
-
 class ModelType(enum.Enum):
     LOCAL = "local"
-    OPENAI_API = "openai_api"
 
 
 class MemoryUsageLevel(enum.Enum):
@@ -331,11 +305,6 @@ class ModelManager:
         return repo.strip().split('/')[-1]
 
     def _generate_display_name(self, model_config: Dict[str, Union[str, List[str]]]) -> str:
-        if model_config.get("type") == ModelType.OPENAI_API.value:
-            model_name = model_config["model_name"]
-            nick_name = model_config.get("nick_name")
-            return f"{nick_name or model_name}({ModelType.OPENAI_API.value})"
-
         model_name = model_config["model_name"]
         default_language = model_config["default_language"]
         quantize = model_config.get("quantize") or "None"
@@ -350,12 +319,6 @@ class ModelManager:
         return "".join(name_parts) + ")"
 
     def get_config_path(self, model_config: Dict[str, Union[str, List[str]]]) -> Path:
-        if model_config.get("type") == ModelType.OPENAI_API.value:
-            model_name = model_config.get('model_name')
-            if not model_name:
-                raise RuntimeError("'model_name' not specified for OpenAI API Model")
-            return self.configs_dir / f"{model_name}{self.CONFIG_EXTENSION}"
-
         mlx_repo = model_config.get("mlx_repo")
         if not mlx_repo:
             model_name = model_config.get('model_name', 'unknown')
@@ -426,30 +389,6 @@ class ModelManager:
             return []
         return abilities
 
-    def add_api_config(self,
-                       model_name: str,
-                       api_key: str,
-                       nick_name: Optional[str] = None,
-                       base_url: Optional[str] = None,
-                       system_prompt: Optional[str] = None) -> None:
-        if not model_name or not api_key:
-            raise ValueError("model_name and api_key are required")
-
-        model_config = {
-            "model_name": model_name,
-            "api_key": api_key,
-            "base_url": base_url,
-            "nick_name": nick_name,
-            "system_prompt": system_prompt,
-            "type": ModelType.OPENAI_API.value
-        }
-
-        display_name = self._generate_display_name(model_config)
-        model_config["display_name"] = display_name
-
-        self._save_config_to_file(model_config)
-        self.model_configs[display_name] = model_config
-
     def _load_config_file(self, config_file: Path) -> Optional[Dict]:
         try:
             with config_file.open("r", encoding="utf-8") as f:
@@ -463,19 +402,7 @@ class ModelManager:
         if not model_config:
             return None
 
-        if model_config.get("type") == ModelType.OPENAI_API.value:
-            return self._process_api_config(model_config)
-        else:
-            return self._process_local_config(model_config)
-
-    def _process_api_config(self, model_config: Dict) -> Optional[Tuple[str, Dict]]:
-        api_key = model_config.get("api_key")
-        if not api_key or not api_key.strip():
-            return None
-
-        display_name = self._generate_display_name(model_config)
-        model_config["display_name"] = display_name
-        return display_name, model_config
+        return self._process_local_config(model_config)
 
     def _process_local_config(self, model_config: Dict) -> Optional[Tuple[str, Dict]]:
         required_fields = ["model_name", "default_language"]
@@ -516,10 +443,7 @@ class ModelManager:
             raise RuntimeError(f"Model '{model_name}' not found")
 
         try:
-            if model_config.get("type") == ModelType.OPENAI_API.value:
-                self._load_openai_model(model_config)
-            else:
-                self._load_local_model(model_config)
+            self._load_local_model(model_config)
 
             self.model_config = model_config
             logging.info(f"Successfully loaded model: {model_name}")
@@ -529,13 +453,6 @@ class ModelManager:
 
             logging.error(f"Error loading model '{model_name}': {e}")
             raise RuntimeError(f"Error loading model '{model_name}': {e}")
-
-    def _load_openai_model(self, model_config: Dict) -> None:
-        self.model = OpenAIModel(
-            api_key=model_config.get("api_key"),
-            model_name=model_config.get("model_name"),
-            base_url=model_config.get("base_url")
-        )
 
     def _load_local_model(self, model_config: Dict) -> None:
         local_model_path = self.get_model_path(model_config)
@@ -577,7 +494,7 @@ class ModelManager:
         gc.collect()
         mlx.core.clear_cache()
 
-    def get_loaded_model(self) -> Optional[Union['BaseLocalModel', 'OpenAIModel']]:
+    def get_loaded_model(self) -> Optional[BaseLocalModel]:
         return self.model
 
     def get_loaded_model_config(self) -> Optional[Dict[str, Union[str, List[str]]]]:

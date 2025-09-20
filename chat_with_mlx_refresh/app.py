@@ -20,7 +20,7 @@ from pandas import DataFrame
 from sentence_transformers import SentenceTransformer
 
 from .language import get_text
-from .model import Message, MessageRole, ModelManager, TextModel, VisionModel, OpenAIModel
+from .model import Message, MessageRole, ModelManager, TextModel, VisionModel, BaseLocalModel
 
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
@@ -107,7 +107,7 @@ class FunctionManager:
                     return node.value
                 raise ValueError(f"Unsupported constant: {node.value!r}")
 
-            if hasattr(ast, "Num") and isinstance(node, ast.Num):
+            if hasattr(ast, "Num") and isinstance(node, ast.Constant):
                 return node.n
 
             if isinstance(node, ast.BinOp):
@@ -346,7 +346,7 @@ User message: {message}"""
 function_manager = FunctionManager()
 
 
-def get_loaded_model() -> Union[TextModel, VisionModel, OpenAIModel]:
+def get_loaded_model() -> Union[BaseLocalModel]:
     model = model_manager.get_loaded_model()
     if model is None:
         raise RuntimeError("No model loaded.")
@@ -737,54 +737,6 @@ def prepare_openai_message_content(text_input: Optional[str], file_paths: Option
     return content_parts
 
 
-def build_openai_api_messages(current_message_dict: Dict, history_list: List[Dict], system_prompt: Optional[str]) -> List[Dict]:
-    api_messages = []
-    if system_prompt and system_prompt.strip():
-        api_messages.append({"role": "system", "content": system_prompt})
-
-    i = 0
-    while i < len(history_list):
-        hist_item = history_list[i]
-        role = hist_item.get("role")
-        content = hist_item.get("content")
-
-        if role not in ("user", "assistant", "tool"):
-            logger.warning(f"Skipping history item with unexpected role: {role}")
-            i += 1
-            continue
-
-        if isinstance(content, tuple):
-            files_in_hist_item = list(content)
-            text_for_files = None
-            if i + 1 < len(history_list) and \
-                    history_list[i + 1].get("role") == role and \
-                    isinstance(history_list[i + 1].get("content"), str):
-                text_for_files = history_list[i + 1]["content"]
-                i += 1
-
-            processed_content_parts = prepare_openai_message_content(text_for_files, files_in_hist_item)
-        elif isinstance(content, str):
-            processed_content_parts = prepare_openai_message_content(content, None)
-        elif isinstance(content, list):
-            processed_content_parts = content
-        else:
-            logger.warning(f"Skipping history item with unexpected content type: {type(content)}")
-            i += 1
-            continue
-
-        if processed_content_parts:
-            api_messages.append({"role": role, "content": processed_content_parts})
-        i += 1
-
-    user_text = current_message_dict.get("text")
-    user_files = current_message_dict.get("files")
-    current_user_content_parts = prepare_openai_message_content(user_text, user_files)
-    if current_user_content_parts:
-        api_messages.append({"role": "user", "content": current_user_content_parts})
-
-    return api_messages
-
-
 def prepare_generic_model_inputs(current_message_dict: Dict, history_list: List[Dict], system_prompt: Optional[str], model_instance: Union[TextModel, VisionModel]) -> Tuple[str, List[Dict], List[str]]:
     effective_history = []
     if system_prompt and system_prompt.strip() != "":
@@ -825,6 +777,389 @@ def prepare_generic_model_inputs(current_message_dict: Dict, history_list: List[
     return processed_message_text, processed_history_list, image_paths
 
 
+from typing import Dict, List, Optional, Iterable, Iterator
+from dataclasses import dataclass, field
+import time
+import json
+import re
+
+# 假定以下对象在你的环境中可用（与原函数相同的依赖）：
+# - get_loaded_model
+# - VisionModel
+# - prepare_generic_model_inputs
+# - function_manager
+# - generation_stop_event
+# - ChatMessage
+# - logger
+# - gr
+
+# -----------------------------
+# 常量与可复用工具
+# -----------------------------
+
+CHATML_CONTROL_TOKENS = [
+    '<|im_start|>', '<|im_end|>',
+    '<|system|>', '<|user|>', '<|assistant|>',
+    '<|end|>', '<|endoftext|>'
+]
+CHATML_STOP_TOKENS = ['<|im_end|>', '<|end|>', '<|endoftext|>']
+
+# 为了避免分块拆到未闭合标签的中间，拦截所有可能的前缀
+DEFAULT_PARTIAL_PREFIXES = [
+    "<", "<t", "<th", "<thi", "<thin", "<think",
+    "</", "</t", "</th", "</thi", "</thin", "</think",
+    "<a", "<an", "<ans", "<answ", "<answe", "<answer",
+    "</a", "</an", "</ans", "</answ", "</answe", "</answer",
+    "<f", "<fu", "<fun", "<func", "<funct", "<functi", "<functio", "<function",
+    "<function_", "<function_c", "<function_ca", "<function_cal", "<function_call"
+]
+
+
+def apply_rag_if_needed(message: Dict, rag_enabled: bool, rag_n_results: int) -> Dict:
+    """
+    根据 RAG 配置增强 message.text。
+    """
+    if rag_enabled and message.get("text"):
+        original_text = message.get("text", "")
+        enhanced_text = enhance_message_with_rag(original_text, rag_enabled, rag_n_results)
+        new_message = dict(message)
+        new_message["text"] = enhanced_text
+        return new_message
+    return message
+
+
+def ensure_model_has_chat_template(model) -> None:
+    """
+    检查模型及其 tokenizer 是否具备 chat_template。
+    """
+    tokenizer_to_check = None
+    if isinstance(model, VisionModel):
+        if getattr(model, "processor", None) and hasattr(model.processor, "tokenizer"):
+            tokenizer_to_check = model.processor.tokenizer
+    elif hasattr(model, "tokenizer"):
+        tokenizer_to_check = model.tokenizer
+
+    if tokenizer_to_check and getattr(tokenizer_to_check, "chat_template", None) is None:
+        model_name = getattr(model, "model_name", type(model).__name__)
+        raise RuntimeError(
+            f"Model {model_name} does not have a chat template. "
+            "Please use the 'Completion' tab or set a chat template."
+        )
+
+
+def normalize_sampling_params(
+    temperature: float,
+    top_k: int,
+    top_p: float,
+    min_p: float,
+    repetition_penalty: float
+) -> Dict[str, float]:
+    """
+    将采样参数规范为正确类型。
+    """
+    return {
+        "temperature": float(temperature),
+        "top_k": int(top_k),
+        "top_p": float(top_p),
+        "min_p": float(min_p),
+        "repetition_penalty": float(repetition_penalty),
+    }
+
+
+def get_eos_token_from_model(model) -> Optional[str]:
+    """
+    基于是否是视觉模型，返回 eos_token。
+    """
+    if isinstance(model, VisionModel):
+        if getattr(model, "processor", None) and getattr(model.processor, "tokenizer", None):
+            return model.processor.tokenizer.eos_token
+        return None
+    return model.tokenizer.eos_token if getattr(model, "tokenizer", None) else None
+
+
+def parse_chunk_text(chunk) -> str:
+    """
+    将多种 chunk 类型统一解析为字符串。
+    """
+    if isinstance(chunk, str):
+        return chunk
+    if hasattr(chunk, "text"):
+        return chunk.text
+    if hasattr(chunk, "choices") and chunk.choices:
+        delta = getattr(chunk.choices[0], "delta", None)
+        if delta is not None and getattr(delta, "content", None):
+            return delta.content
+    logger.warning(f"Unexpected chunk type from model: {type(chunk)}")
+    return ""
+
+
+def trim_to_eos_if_streaming(text: str, eos_token: Optional[str], stream: bool) -> (str, bool):
+    """
+    在流式模式下，如遇到 eos_token，返回截断文本与是否应在本 chunk 后停止。
+    """
+    if stream and eos_token and eos_token in text:
+        if text == eos_token:
+            return "", True
+        else:
+            return text.split(eos_token)[0], True
+    return text, False
+
+
+def filter_chatml_tokens_and_stop(
+    text: str,
+    control_tokens: List[str],
+    stop_tokens: List[str]
+) -> (str, bool):
+    """
+    过滤 ChatML 控制 token；若发现停止 token，则截断并标记应停止。
+    """
+    should_stop = False
+    filtered = text
+
+    for stop_token in stop_tokens:
+        if stop_token in filtered:
+            should_stop = True
+            idx = filtered.find(stop_token)
+            filtered = filtered[:idx]
+            break
+
+    for tok in control_tokens:
+        filtered = filtered.replace(tok, "")
+
+    return filtered, should_stop
+
+
+def strip_answer_tags(text: str) -> str:
+    """
+    去除 <answer> 标签对。
+    """
+    return text.replace("<answer>", "").replace("</answer>", "")
+
+
+def merge_with_partial_buffer(
+    prior_buffer: str,
+    text: str,
+    partial_prefixes: List[str]
+) -> (str, str):
+    """
+    处理上次遗留的半截标签与本次文本拼接，并将本次末尾半截标签缓存。
+    返回 (可安全消费的文本, 新的缓存)。
+    """
+    text = f"{prior_buffer}{text}" if prior_buffer else text
+    new_buffer = ""
+    if not text:
+        return text, new_buffer
+
+    for partial in partial_prefixes:
+        if text.endswith(partial):
+            # 将半截标签移入 buffer，避免外部消费
+            new_buffer = partial
+            text = text[:-len(partial)]
+            break
+    return text, new_buffer
+
+
+# -----------------------------
+# 统一的流式解析 Session
+# -----------------------------
+
+@dataclass
+class StreamSession:
+    """
+    负责将模型的 response_stream 解析为
+    - thinking_message（<think> 内）与
+    - chat_message_accumulator（最终展示内容）
+    并在流式模式下按需增量 yield。
+    """
+    response_stream: Iterable
+    eos_token: Optional[str]
+    stream: bool
+    generation_stop_event: any  # threading.Event 或类似对象
+    control_tokens: List[str] = field(default_factory=lambda: CHATML_CONTROL_TOKENS)
+    stop_tokens: List[str] = field(default_factory=lambda: CHATML_STOP_TOKENS)
+    partial_prefixes: List[str] = field(default_factory=lambda: DEFAULT_PARTIAL_PREFIXES)
+    thinking_title: str = "Thinking"
+    inline_thought_title: str = "Thinking"
+    thinking_id: int = 0
+    base_messages: List = field(default_factory=list)  # 每次 yield 时统一前缀
+    # 运行时状态
+    chat_message_accumulator: any = field(default_factory=lambda: ChatMessage(role="assistant", content=""))
+    thinking_message: Optional[any] = None
+    full_response: str = ""
+    final_messages: List = field(default_factory=list)
+
+    def __iter__(self) -> Iterator:
+        final_content_parts: List[str] = []
+        thinking_content_parts: List[str] = []
+        in_thinking = False
+        thinking_start_time: Optional[float] = None
+        chunk_buffer = ""
+
+        for chunk in self.response_stream:
+            if self.generation_stop_event.is_set():
+                break
+
+            # 统一解析 chunk 文本
+            chunk_text = parse_chunk_text(chunk)
+            if not chunk_text:
+                continue
+
+            self.full_response += chunk_text
+
+            # 流式时遇到 eos_token 则截断并标记本轮后停止
+            chunk_text, eos_hit = trim_to_eos_if_streaming(chunk_text, self.eos_token, self.stream)
+
+            # 合并半截标签，提取可消费文本
+            chunk_text, chunk_buffer = merge_with_partial_buffer(chunk_buffer, chunk_text, self.partial_prefixes)
+            if not chunk_text:
+                if eos_hit:
+                    break
+                continue
+
+            # 过滤 ChatML 与 <answer> 标签
+            chunk_text, should_stop = filter_chatml_tokens_and_stop(chunk_text, self.control_tokens, self.stop_tokens)
+            chunk_text = strip_answer_tags(chunk_text)
+
+            if should_stop:
+                # 已遇到停止 token，将当前内容收尾并一次性输出
+                if in_thinking:
+                    thinking_content_parts.append(chunk_text)
+                    self._ensure_thinking_message(thinking_title=self.thinking_title, status="pending")
+                    self.thinking_message.content = "".join(thinking_content_parts)
+                    self.thinking_message.metadata["status"] = "done"
+                    self.thinking_message.metadata["duration"] = time.time() - (thinking_start_time or time.time())
+                    if self.stream:
+                        yield self.base_messages + [self.thinking_message, self.chat_message_accumulator]
+                else:
+                    final_content_parts.append(chunk_text)
+                    self.chat_message_accumulator.content = "".join(final_content_parts)
+                    if self.stream:
+                        if self.thinking_message and self.thinking_message.metadata.get("status") == "done":
+                            yield self.base_messages + [self.thinking_message, self.chat_message_accumulator]
+                        else:
+                            yield self.base_messages + [self.chat_message_accumulator]
+                break
+
+            # <think> 开始（且之前不在思考中）
+            if "<think>" in chunk_text and not in_thinking:
+                in_thinking = True
+                thinking_start_time = time.time()
+                self._ensure_thinking_message(thinking_title=self.thinking_title, status="pending")
+
+                think_open_idx = chunk_text.find("<think>")
+                think_start_idx = think_open_idx + len("<think>")
+
+                before_think = chunk_text[:think_open_idx]
+                if before_think:
+                    final_content_parts.append(before_think)
+                    self.chat_message_accumulator.content = "".join(final_content_parts)
+
+                if think_start_idx < len(chunk_text):
+                    thinking_content_parts.append(chunk_text[think_start_idx:])
+                    self.thinking_message.content = "".join(thinking_content_parts)
+
+                if self.stream:
+                    # 与原逻辑一致：此刻仅推送思考消息，不推送 before_think 已更新的回答
+                    yield self.base_messages + [self.thinking_message]
+                continue
+
+            # 思考中，且未闭合
+            if in_thinking and "</think>" not in chunk_text:
+                thinking_content_parts.append(chunk_text)
+                self._ensure_thinking_message(thinking_title=self.thinking_title, status="pending")
+                self.thinking_message.content = "".join(thinking_content_parts)
+                if self.stream:
+                    yield self.base_messages + [self.thinking_message]
+                continue
+
+            # 思考中，且本块闭合
+            if in_thinking and "</think>" in chunk_text:
+                think_end_idx = chunk_text.find("</think>")
+                thinking_content_parts.append(chunk_text[:think_end_idx])
+                self._ensure_thinking_message(thinking_title=self.thinking_title, status="pending")
+                self.thinking_message.content = "".join(thinking_content_parts)
+                self.thinking_message.metadata["status"] = "done"
+                self.thinking_message.metadata["duration"] = time.time() - (thinking_start_time or time.time())
+
+                remaining = chunk_text[think_end_idx + len("</think>"):]
+                if remaining.strip():
+                    final_content_parts.append(remaining)
+                    self.chat_message_accumulator.content = "".join(final_content_parts)
+
+                if self.stream:
+                    payload = self.base_messages + [self.thinking_message]
+                    if self.chat_message_accumulator.content:
+                        payload += [self.chat_message_accumulator]
+                    yield payload
+                in_thinking = False
+                continue
+
+            # 不在思考中
+            if not in_thinking:
+                # 同块内出现完整的 <think>...</think>
+                if "<think>" in chunk_text and "</think>" in chunk_text:
+                    think_match = re.search(r"<think>(.*?)</think>", chunk_text, re.DOTALL)
+                    if think_match:
+                        extracted = think_match.group(1)
+                        self.thinking_message = ChatMessage(
+                            role="assistant",
+                            content=extracted,
+                            metadata={
+                                "title": self.inline_thought_title,
+                                "id": self.thinking_id,
+                                "status": "done",
+                                "duration": 0.1
+                            }
+                        )
+                        before_think = chunk_text[:chunk_text.find("<think>")]
+                        after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
+                        if before_think:
+                            final_content_parts.append(before_think)
+                        if after_think:
+                            final_content_parts.append(after_think)
+                        self.chat_message_accumulator.content = "".join(final_content_parts)
+
+                        if self.stream:
+                            payload = self.base_messages + [self.thinking_message]
+                            if self.chat_message_accumulator.content:
+                                payload += [self.chat_message_accumulator]
+                            yield payload
+                        continue
+
+                # 普通回答内容
+                final_content_parts.append(chunk_text)
+                self.chat_message_accumulator.content = "".join(final_content_parts)
+                if self.stream:
+                    if self.thinking_message and self.thinking_message.metadata.get("status") == "done":
+                        yield self.base_messages + [self.thinking_message, self.chat_message_accumulator]
+                    else:
+                        yield self.base_messages + [self.chat_message_accumulator]
+
+            # 流式模式下若刚刚截到 eos，本轮后停止
+            if self.stream and eos_hit:
+                break
+
+        # 汇总最终消息（用于后续函数调用 / 非流式一次返回）
+        if self.thinking_message and self.thinking_message.metadata.get("status") == "done":
+            self.final_messages = [self.thinking_message]
+            if self.chat_message_accumulator.content:
+                self.final_messages.append(self.chat_message_accumulator)
+        else:
+            self.final_messages = [self.chat_message_accumulator] if self.chat_message_accumulator.content else []
+
+    def _ensure_thinking_message(self, thinking_title: str, status: str):
+        if not self.thinking_message:
+            self.thinking_message = ChatMessage(
+                role="assistant",
+                content="",
+                metadata={"title": thinking_title, "id": self.thinking_id, "status": status}
+            )
+
+
+# -----------------------------
+# 重构后的 handle_chat
+# -----------------------------
+
 def handle_chat(message: Dict,
                 history: List[Dict],
                 system_prompt: str = None,
@@ -838,737 +1173,118 @@ def handle_chat(message: Dict,
                 rag_n_results: int = 5,
                 function_calling_enabled: bool = False,
                 stream: bool = True):
-    if rag_enabled and message.get("text"):
-        original_text = message.get("text", "")
-        enhanced_text = enhance_message_with_rag(original_text, rag_enabled, rag_n_results)
-        message = dict(message)
-        message["text"] = enhanced_text
-
-    CHATML_CONTROL_TOKENS = [
-        '<|im_start|>', '<|im_end|>',
-        '<|system|>', '<|user|>', '<|assistant|>',
-        '<|end|>', '<|endoftext|>'
-    ]
-
-    CHATML_STOP_TOKENS = ['<|im_end|>', '<|end|>', '<|endoftext|>']
-
-    def filter_chatml_tokens(text: str) -> tuple[str, bool]:
-        should_stop = False
-        filtered_text = text
-
-        for stop_token in CHATML_STOP_TOKENS:
-            if stop_token in text:
-                should_stop = True
-                stop_index = text.find(stop_token)
-                filtered_text = text[:stop_index]
-                break
-
-        for token in CHATML_CONTROL_TOKENS:
-            filtered_text = filtered_text.replace(token, '')
-
-        return filtered_text, should_stop
-
-    def filter_answer_tags(text: str) -> str:
-        return text.replace('<answer>', '').replace('</answer>', '')
-
     try:
+        message = apply_rag_if_needed(message, rag_enabled, rag_n_results)
+
         model = get_loaded_model()
+        ensure_model_has_chat_template(model)
 
-        if isinstance(model, OpenAIModel):
-            api_messages = build_openai_api_messages(message, history, system_prompt)
+        processed_message_text, processed_history_list, image_paths = prepare_generic_model_inputs(
+            message, history, system_prompt, model
+        )
 
-            tools = None
-            if function_calling_enabled and function_manager.is_enabled():
-                tools = function_manager.get_openai_tools()
+        if function_calling_enabled and function_manager.is_enabled():
+            processed_message_text = function_manager.format_function_call_for_local_model(processed_message_text)
 
-            response_stream = model.generate_response(
-                messages=api_messages,
-                stream=stream,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=max_tokens,
-                n=1,
-                tools=tools if tools else None
-            )
+        sampling = normalize_sampling_params(temperature, top_k, top_p, min_p, repetition_penalty)
 
-            chat_message_accumulator = ChatMessage(role="assistant", content="")
-            thinking_message = None
-            thinking_content_parts = []
-            final_content_parts = []
-            in_thinking = False
-            thinking_start_time = None
-            chunk_buffer = ""
-            tool_calls_accumulator = []
+        response_args = {
+            "message": processed_message_text,
+            "history": processed_history_list,
+            "stream": stream,
+            "max_tokens": max_tokens,
+            **sampling
+        }
+        if isinstance(model, VisionModel):
+            response_args["images"] = image_paths
+        eos_token = get_eos_token_from_model(model)
 
-            final_messages = []
+        response_stream = model.generate_response(**response_args)
+        session = StreamSession(
+            response_stream=response_stream,
+            eos_token=eos_token,
+            stream=stream,
+            generation_stop_event=generation_stop_event,
+            thinking_title="Thinking",
+            inline_thought_title="Thinking",
+            thinking_id=0,
+            base_messages=[]
+        )
+        for payload in session:
+            yield payload
 
-            if stream:
-                for chunk in response_stream:
-                    if generation_stop_event.is_set():
-                        break
-                    if chunk.choices:
-                        delta = chunk.choices[0].delta
+        final_messages = session.final_messages
+        full_response = session.full_response
 
-                        if hasattr(delta, 'tool_calls') and delta.tool_calls:
-                            for tool_call in delta.tool_calls:
-                                if tool_call.function:
-                                    if len(tool_calls_accumulator) <= tool_call.index:
-                                        tool_calls_accumulator.append({
-                                            'id': tool_call.id,
-                                            'name': '',
-                                            'arguments': ''
-                                        })
+        if function_calling_enabled and function_manager.is_enabled():
+            function_call = function_manager.parse_function_call_from_response(full_response)
+            if function_call:
+                function_name, function_args = function_call
+                result = function_manager.execute_function(function_name, function_args)
 
-                                    if tool_call.function.name:
-                                        tool_calls_accumulator[tool_call.index]['name'] = tool_call.function.name
-                                    if tool_call.function.arguments:
-                                        tool_calls_accumulator[tool_call.index]['arguments'] += tool_call.function.arguments
+                function_message = ChatMessage(
+                    role="assistant",
+                    content=(
+                        f"**Function Call:** `{function_name}`\n"
+                        f"**Arguments:** `{json.dumps(function_args)}`\n"
+                        f"**Result:** {json.dumps(result)}"
+                    ),
+                    metadata={"title": "Function Call", "id": 1, "status": "done"}
+                )
 
-                        if delta.content:
-                            chunk_text = ''.join([chunk_buffer, delta.content])
-                            chunk_buffer = ""
+                current_messages = list(final_messages) + [function_message]
+                if stream:
+                    yield current_messages
 
-                            for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think", "<a", "<an", "<ans", "<answ", "<answe", "<answer", "</a", "</an", "</ans", "</answ", "</answe",
-                                            "</answer"]:
-                                if chunk_text.endswith(partial):
-                                    chunk_buffer = partial
-                                    chunk_text = chunk_text[:-len(partial)]
-                                    break
-
-                            if not chunk_text:
-                                continue
-
-                            chunk_text, should_stop = filter_chatml_tokens(chunk_text)
-                            chunk_text = filter_answer_tags(chunk_text)
-
-                            if should_stop:
-                                if in_thinking:
-                                    thinking_content_parts.append(chunk_text)
-                                    thinking_message.content = ''.join(thinking_content_parts)
-                                    thinking_message.metadata["title"] = "Thinking"
-                                    thinking_message.metadata["status"] = "done"
-                                    thinking_message.metadata["duration"] = time.time() - thinking_start_time
-                                    yield [thinking_message, chat_message_accumulator]
-                                else:
-                                    final_content_parts.append(chunk_text)
-                                    chat_message_accumulator.content = ''.join(final_content_parts)
-                                    if thinking_message and thinking_message.metadata.get("status") == "done":
-                                        yield [thinking_message, chat_message_accumulator]
-                                    else:
-                                        yield chat_message_accumulator
-                                break
-
-                            if "<think>" in chunk_text and not in_thinking:
-                                in_thinking = True
-                                thinking_start_time = time.time()
-                                thinking_message = ChatMessage(
-                                    role="assistant",
-                                    content="",
-                                    metadata={"title": "Thinking", "id": 0, "status": "pending"}
-                                )
-                                think_start_idx = chunk_text.find("<think>") + len("<think>")
-                                before_think = chunk_text[:chunk_text.find("<think>")]
-                                if before_think:
-                                    final_content_parts.append(before_think)
-                                    chat_message_accumulator.content = ''.join(final_content_parts)
-                                if think_start_idx < len(chunk_text):
-                                    thinking_content_parts.append(chunk_text[think_start_idx:])
-                                    thinking_message.content = ''.join(thinking_content_parts)
-                                yield thinking_message
-                                continue
-
-                            elif in_thinking and "</think>" not in chunk_text:
-                                thinking_content_parts.append(chunk_text)
-                                thinking_message.content = ''.join(thinking_content_parts)
-                                yield thinking_message
-                                continue
-
-                            elif in_thinking and "</think>" in chunk_text:
-                                think_end_idx = chunk_text.find("</think>")
-                                thinking_content_parts.append(chunk_text[:think_end_idx])
-                                thinking_message.content = ''.join(thinking_content_parts)
-                                thinking_message.metadata["title"] = "Thinking"
-                                thinking_message.metadata["status"] = "done"
-                                thinking_message.metadata["duration"] = time.time() - thinking_start_time
-
-                                remaining_content = chunk_text[think_end_idx + len("</think>"):]
-                                if remaining_content.strip():
-                                    final_content_parts.append(remaining_content)
-                                    chat_message_accumulator.content = ''.join(final_content_parts)
-
-                                yield [thinking_message, chat_message_accumulator]
-                                in_thinking = False
-                                continue
-
-                            elif not in_thinking:
-                                if "<think>" in chunk_text and "</think>" in chunk_text:
-                                    think_match = re.search(r'<think>(.*?)</think>', chunk_text, re.DOTALL)
-                                    if think_match:
-                                        thinking_start_time = time.time()
-                                        extracted_thinking = think_match.group(1)
-                                        thinking_message = ChatMessage(
-                                            role="assistant",
-                                            content=extracted_thinking,
-                                            metadata={
-                                                "title": "Thinking",
-                                                "id": 0,
-                                                "status": "done",
-                                                "duration": 0.1
-                                            }
-                                        )
-
-                                        before_think = chunk_text[:chunk_text.find("<think>")]
-                                        after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
-                                        if before_think:
-                                            final_content_parts.append(before_think)
-                                        if after_think:
-                                            final_content_parts.append(after_think)
-                                        chat_message_accumulator.content = ''.join(final_content_parts)
-
-                                        yield [thinking_message, chat_message_accumulator]
-                                        continue
-                                else:
-                                    final_content_parts.append(chunk_text)
-                                    chat_message_accumulator.content = ''.join(final_content_parts)
-                                    if thinking_message and thinking_message.metadata.get("status") == "done":
-                                        yield [thinking_message, chat_message_accumulator]
-                                    else:
-                                        yield chat_message_accumulator
-
-                if thinking_message and thinking_message.metadata.get("status") == "done":
-                    final_messages = [thinking_message, chat_message_accumulator]
-                else:
-                    final_messages = [chat_message_accumulator] if chat_message_accumulator.content else []
-
-                if tool_calls_accumulator:
-                    for tool_call_data in tool_calls_accumulator:
-                        function_name = tool_call_data['name']
-                        function_args = tool_call_data['arguments']
-
-                        result = function_manager.execute_function(function_name, function_args)
-
-                        function_message = ChatMessage(
-                            role="assistant",
-                            content=f"**Function Call:** `{function_name}`\n**Arguments:** `{function_args}`\n**Result:** {json.dumps(result)}",
-                            metadata={"title": "Function Call", "id": 1, "status": "done"}
+                if "result" in result:
+                    assistant_full_response = ""
+                    if session.thinking_message and session.thinking_message.content:
+                        assistant_full_response = "<think>{}</think>\n{}".format(
+                            session.thinking_message.content,
+                            session.chat_message_accumulator.content or f"I'll call the {function_name} function."
                         )
-
-                        if thinking_message and thinking_message.metadata.get("status") == "done":
-                            yield [thinking_message, chat_message_accumulator, function_message]
-                        else:
-                            if chat_message_accumulator.content:
-                                yield [chat_message_accumulator, function_message]
-                            else:
-                                yield function_message
-
-                        if "result" in result:
-                            assistant_full_response = ""
-
-                            if thinking_message and thinking_message.content:
-                                assistant_full_response = "<think>{}</think>\n{}".format(thinking_message.content, chat_message_accumulator.content or "I'll call the {} function.".format(function_name))
-                            else:
-                                assistant_full_response = chat_message_accumulator.content or f"I'll call the {function_name} function."
-
-                            follow_up_messages = api_messages + [
-                                {"role": "assistant", "content": assistant_full_response},
-                                {"role": "tool", "content": json.dumps(result["result"]), "name": function_name}
-                            ]
-
-                            follow_up_response = model.generate_response(
-                                messages=follow_up_messages,
-                                stream=False,
-                                temperature=temperature,
-                                top_p=top_p,
-                                max_tokens=max_tokens
-                            )
-
-                            if follow_up_response.choices:
-                                final_response_content = follow_up_response.choices[0].message.content
-
-                                follow_up_think_match = re.search(r'<think>(.*?)</think>', final_response_content, re.DOTALL)
-                                if follow_up_think_match:
-                                    follow_up_thinking = follow_up_think_match.group(1)
-                                    follow_up_thinking_message = ChatMessage(
-                                        role="assistant",
-                                        content=follow_up_thinking,
-                                        metadata={
-                                            "title": "Follow-up Thought",
-                                            "id": 2,
-                                            "status": "done",
-                                            "duration": 0.1
-                                        }
-                                    )
-                                    final_response_content = re.sub(r'<think>.*?</think>', '', final_response_content, flags=re.DOTALL).strip()
-
-                                    final_response = ChatMessage(
-                                        role="assistant",
-                                        content=final_response_content
-                                    )
-
-                                    all_messages = []
-                                    if thinking_message and thinking_message.metadata.get("status") == "done":
-                                        all_messages.append(thinking_message)
-                                    if chat_message_accumulator.content:
-                                        all_messages.append(chat_message_accumulator)
-                                    all_messages.extend([function_message, follow_up_thinking_message, final_response])
-                                    yield all_messages
-                                else:
-                                    final_response = ChatMessage(
-                                        role="assistant",
-                                        content=final_response_content
-                                    )
-
-                                    all_messages = []
-                                    if thinking_message and thinking_message.metadata.get("status") == "done":
-                                        all_messages.append(thinking_message)
-                                    if chat_message_accumulator.content:
-                                        all_messages.append(chat_message_accumulator)
-                                    all_messages.extend([function_message, final_response])
-                                    yield all_messages
-            else:
-                if response_stream.choices:
-                    full_content = response_stream.choices[0].message.content
-
-                    full_content, _ = filter_chatml_tokens(full_content)
-                    full_content = filter_answer_tags(full_content)
-
-                    think_match = re.search(r'<think>(.*?)</think>', full_content, re.DOTALL)
-                    if think_match:
-                        thinking_content = think_match.group(1)
-                        thinking_message = ChatMessage(
-                            role="assistant",
-                            content=thinking_content,
-                            metadata={
-                                "title": "Thinking",
-                                "id": 0,
-                                "status": "done",
-                                "duration": 0.1
-                            }
-                        )
-
-                        final_content = re.sub(r'<think>.*?</think>', '', full_content, flags=re.DOTALL).strip()
-                        chat_message_accumulator.content = final_content
-
-                        yield [thinking_message, chat_message_accumulator]
                     else:
-                        chat_message_accumulator.content = full_content
-                        yield chat_message_accumulator
-                else:
-                    logger.error("OpenAI non-stream response had no choices.")
-                    yield ChatMessage(role="assistant", content="Error: No response from model.")
-        else:
-            tokenizer_to_check = None
-            if isinstance(model, VisionModel):
-                if model.processor and hasattr(model.processor, 'tokenizer'):
-                    tokenizer_to_check = model.processor.tokenizer
-            elif hasattr(model, 'tokenizer'):
-                tokenizer_to_check = model.tokenizer
+                        assistant_full_response = session.chat_message_accumulator.content or f"I'll call the {function_name} function."
 
-            if tokenizer_to_check and tokenizer_to_check.chat_template is None:
-                raise RuntimeError("Model {} does not have a chat template. Please use the 'Completion' tab or set a chat template.".format(model.model_name if hasattr(model, 'model_name') else type(model).__name__))
+                    enhanced_history = processed_history_list + [
+                        {"role": "assistant", "content": assistant_full_response},
+                        {"role": "tool", "content": json.dumps(result["result"]), "name": function_name}
+                    ]
 
-            processed_message_text, processed_history_list, image_paths = prepare_generic_model_inputs(message, history, system_prompt, model)
-
-            if function_calling_enabled and function_manager.is_enabled():
-                processed_message_text = function_manager.format_function_call_for_local_model(processed_message_text)
-
-            temperature = float(temperature)
-            top_k = int(top_k)
-            top_p = float(top_p)
-            min_p = float(min_p)
-            repetition_penalty = float(repetition_penalty)
-
-            response_args = {
-                "message": processed_message_text,
-                "history": processed_history_list,
-                "stream": stream,
-                "temperature": temperature,
-                "top_k": top_k,
-                "top_p": top_p,
-                "min_p": min_p,
-                "max_tokens": max_tokens,
-                "repetition_penalty": repetition_penalty,
-            }
-            if isinstance(model, VisionModel):
-                response_args["images"] = image_paths
-                eos_token = model.processor.tokenizer.eos_token if model.processor and model.processor.tokenizer else None
-            else:
-                eos_token = model.tokenizer.eos_token if model.tokenizer else None
-
-            response_stream = model.generate_response(**response_args)
-
-            chat_message_accumulator = ChatMessage(role="assistant", content="")
-            thinking_message = None
-            thinking_content_parts = []
-            final_content_parts = []
-            in_thinking = False
-            thinking_start_time = None
-            chunk_buffer = ""
-            full_response = ""
-            final_messages = []
-
-            for chunk in response_stream:
-                if generation_stop_event.is_set():
-                    break
-                chunk_text = ""
-                if isinstance(chunk, str):
-                    chunk_text = chunk
-                elif hasattr(chunk, "text"):
-                    chunk_text = chunk.text
-                elif hasattr(chunk, "choices") and chunk.choices and hasattr(chunk.choices[0], "delta") and chunk.choices[0].delta.content:
-                    chunk_text = chunk.choices[0].delta.content
-                else:
-                    logger.warning(f"Unexpected chunk type from model: {type(chunk)}")
-
-                if chunk_text:
-                    full_response += chunk_text
-
-                    if stream and eos_token and eos_token in chunk_text:
-                        if chunk_text == eos_token:
-                            break
-                        chunk_text = chunk_text.split(eos_token)[0]
-
-                    chunk_text = ''.join([chunk_buffer, chunk_text])
-                    chunk_buffer = ""
-
-                    for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think", "<a", "<an", "<ans", "<answ", "<answe", "<answer", "</a", "</an", "</ans", "</answ", "</answe", "</answer",
-                                    "<f", "<fu", "<fun", "<func", "<funct", "<functi", "<functio", "<function", "<function_", "<function_c", "<function_ca", "<function_cal", "<function_call"]:
-                        if chunk_text.endswith(partial):
-                            chunk_buffer = partial
-                            chunk_text = chunk_text[:-len(partial)]
-                            break
-
-                    if not chunk_text:
-                        continue
-
-                    chunk_text, should_stop = filter_chatml_tokens(chunk_text)
-                    chunk_text = filter_answer_tags(chunk_text)
-
-                    if should_stop:
-                        if in_thinking:
-                            thinking_content_parts.append(chunk_text)
-                            thinking_message.content = ''.join(thinking_content_parts)
-                            thinking_message.metadata["status"] = "done"
-                            thinking_message.metadata["duration"] = time.time() - thinking_start_time
-                            if stream:
-                                yield [thinking_message, chat_message_accumulator]
-                        else:
-                            final_content_parts.append(chunk_text)
-                            chat_message_accumulator.content = ''.join(final_content_parts)
-                            if thinking_message and thinking_message.metadata.get("status") == "done":
-                                if stream:
-                                    yield [thinking_message, chat_message_accumulator]
-                            else:
-                                if stream:
-                                    yield chat_message_accumulator
-                        break
-
-                    if "<think>" in chunk_text and not in_thinking:
-                        in_thinking = True
-                        thinking_start_time = time.time()
-                        thinking_message = ChatMessage(
-                            role="assistant",
-                            content="",
-                            metadata={"title": "Thinking", "id": 0, "status": "pending"}
-                        )
-                        think_start_idx = chunk_text.find("<think>") + len("<think>")
-                        before_think = chunk_text[:chunk_text.find("<think>")]
-                        if before_think:
-                            final_content_parts.append(before_think)
-                            chat_message_accumulator.content = ''.join(final_content_parts)
-                        if think_start_idx < len(chunk_text):
-                            thinking_content_parts.append(chunk_text[think_start_idx:])
-                            thinking_message.content = ''.join(thinking_content_parts)
-                        if stream:
-                            yield thinking_message
-                        continue
-
-                    elif in_thinking and "</think>" not in chunk_text:
-                        thinking_content_parts.append(chunk_text)
-                        thinking_message.content = ''.join(thinking_content_parts)
-                        if stream:
-                            yield thinking_message
-                        continue
-
-                    elif in_thinking and "</think>" in chunk_text:
-                        think_end_idx = chunk_text.find("</think>")
-                        thinking_content_parts.append(chunk_text[:think_end_idx])
-                        thinking_message.content = ''.join(thinking_content_parts)
-                        thinking_message.metadata["status"] = "done"
-                        thinking_message.metadata["duration"] = time.time() - thinking_start_time
-
-                        remaining_content = chunk_text[think_end_idx + len("</think>"):]
-                        if remaining_content.strip():
-                            final_content_parts.append(remaining_content)
-                            chat_message_accumulator.content = ''.join(final_content_parts)
-
-                        if stream:
-                            yield [thinking_message, chat_message_accumulator]
-                        in_thinking = False
-                        continue
-
-                    elif not in_thinking:
-                        if "<think>" in chunk_text and "</think>" in chunk_text:
-                            think_match = re.search(r'<think>(.*?)</think>', chunk_text, re.DOTALL)
-                            if think_match:
-                                thinking_start_time = time.time()
-                                extracted_thinking = think_match.group(1)
-                                thinking_message = ChatMessage(
-                                    role="assistant",
-                                    content=extracted_thinking,
-                                    metadata={
-                                        "title": "Thinking",
-                                        "id": 0,
-                                        "status": "done",
-                                        "duration": 0.1
-                                    }
-                                )
-
-                                before_think = chunk_text[:chunk_text.find("<think>")]
-                                after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
-                                if before_think:
-                                    final_content_parts.append(before_think)
-                                if after_think:
-                                    final_content_parts.append(after_think)
-                                chat_message_accumulator.content = ''.join(final_content_parts)
-
-                                if stream:
-                                    yield [thinking_message, chat_message_accumulator]
-                                continue
-                        else:
-                            final_content_parts.append(chunk_text)
-                            chat_message_accumulator.content = ''.join(final_content_parts)
-                            if thinking_message and thinking_message.metadata.get("status") == "done":
-                                if stream:
-                                    yield [thinking_message, chat_message_accumulator]
-                            else:
-                                if stream:
-                                    yield chat_message_accumulator
-
-                    if stream and eos_token and eos_token in chunk_text:
-                        break
-
-            if thinking_message and thinking_message.metadata.get("status") == "done":
-                final_messages = [thinking_message, chat_message_accumulator]
-            else:
-                final_messages = [chat_message_accumulator] if chat_message_accumulator.content else []
-
-            if function_calling_enabled and function_manager.is_enabled():
-                function_call = function_manager.parse_function_call_from_response(full_response)
-                if function_call:
-                    function_name, function_args = function_call
-                    result = function_manager.execute_function(function_name, function_args)
-
-                    function_message = ChatMessage(
-                        role="assistant",
-                        content=f"**Function Call:** `{function_name}`\n**Arguments:** `{json.dumps(function_args)}`\n**Result:** {json.dumps(result)}",
-                        metadata={"title": "Function Call", "id": 1, "status": "done"}
+                    follow_up_prompt = (
+                        f"Based on the function '{function_name}' result: "
+                        f"{json.dumps(result['result'])}, please provide a helpful response to the user's original question."
                     )
 
-                    current_messages = final_messages + [function_message]
-                    if stream:
-                        yield current_messages
+                    follow_up_args = {
+                        "message": follow_up_prompt,
+                        "history": enhanced_history,
+                        "stream": stream,
+                        "max_tokens": max_tokens,
+                        **sampling
+                    }
+                    if isinstance(model, VisionModel) and image_paths:
+                        follow_up_args["images"] = image_paths
 
-                    if "result" in result:
-                        assistant_full_response = ""
+                    follow_up_response_stream = model.generate_response(**follow_up_args)
 
-                        if thinking_message and thinking_message.content:
-                            assistant_full_response = "<think>{}</think>\n{}".format(thinking_message.content, chat_message_accumulator.content or "I'll call the {} function.".format(function_name))
-                        else:
-                            assistant_full_response = chat_message_accumulator.content or f"I'll call the {function_name} function."
+                    follow_up_session = StreamSession(
+                        response_stream=follow_up_response_stream,
+                        eos_token=eos_token,
+                        stream=stream,
+                        generation_stop_event=generation_stop_event,
+                        thinking_title="Follow-up Thinking",
+                        inline_thought_title="Follow-up Thought",
+                        thinking_id=2,
+                        base_messages=list(final_messages) + [function_message]
+                    )
 
-                        enhanced_history = processed_history_list + [
-                            {"role": "assistant", "content": assistant_full_response},
-                            {"role": "tool", "content": json.dumps(result["result"]), "name": function_name}
-                        ]
+                    for payload in follow_up_session:
+                        yield payload
 
-                        follow_up_prompt = f"Based on the function '{function_name}' result: {json.dumps(result['result'])}, please provide a helpful response to the user's original question."
-
-                        follow_up_args = {
-                            "message": follow_up_prompt,
-                            "history": enhanced_history,
-                            "stream": stream,
-                            "temperature": temperature,
-                            "top_k": top_k,
-                            "top_p": top_p,
-                            "min_p": min_p,
-                            "max_tokens": max_tokens,
-                            "repetition_penalty": repetition_penalty,
-                        }
-
-                        if isinstance(model, VisionModel) and image_paths:
-                            follow_up_args["images"] = image_paths
-
-                        follow_up_response_stream = model.generate_response(**follow_up_args)
-
-                        follow_up_accumulator = ChatMessage(role="assistant", content="")
-                        follow_up_thinking_message = None
-                        follow_up_thinking_parts = []
-                        follow_up_final_parts = []
-                        follow_up_in_thinking = False
-                        follow_up_thinking_start = None
-                        follow_up_buffer = ""
-
-                        for chunk in follow_up_response_stream:
-                            if generation_stop_event.is_set():
-                                break
-
-                            chunk_text = ""
-                            if isinstance(chunk, str):
-                                chunk_text = chunk
-                            elif hasattr(chunk, "text"):
-                                chunk_text = chunk.text
-                            elif hasattr(chunk, "choices") and chunk.choices and hasattr(chunk.choices[0], "delta") and chunk.choices[0].delta.content:
-                                chunk_text = chunk.choices[0].delta.content
-
-                            if chunk_text:
-                                if eos_token and eos_token in chunk_text:
-                                    if chunk_text == eos_token:
-                                        break
-                                    chunk_text = chunk_text.split(eos_token)[0]
-
-                                chunk_text = ''.join([follow_up_buffer, chunk_text])
-                                follow_up_buffer = ""
-
-                                for partial in ["<", "<t", "<th", "<thi", "<thin", "<think", "</", "</t", "</th", "</thi", "</thin", "</think",
-                                                "<a", "<an", "<ans", "<answ", "<answe", "<answer", "</a", "</an", "</ans", "</answ", "</answe", "</answer"]:
-                                    if chunk_text.endswith(partial):
-                                        follow_up_buffer = partial
-                                        chunk_text = chunk_text[:-len(partial)]
-                                        break
-
-                                if not chunk_text:
-                                    continue
-
-                                chunk_text, should_stop = filter_chatml_tokens(chunk_text)
-                                chunk_text = filter_answer_tags(chunk_text)
-
-                                if should_stop:
-                                    if follow_up_in_thinking:
-                                        follow_up_thinking_parts.append(chunk_text)
-                                        follow_up_thinking_message.content = ''.join(follow_up_thinking_parts)
-                                        follow_up_thinking_message.metadata["status"] = "done"
-                                        follow_up_thinking_message.metadata["duration"] = time.time() - follow_up_thinking_start
-                                    else:
-                                        follow_up_final_parts.append(chunk_text)
-                                        follow_up_accumulator.content = ''.join(follow_up_final_parts)
-
-                                    all_messages = list(final_messages) + [function_message]
-                                    if follow_up_thinking_message and follow_up_thinking_message.metadata.get("status") == "done":
-                                        all_messages.append(follow_up_thinking_message)
-                                    if follow_up_accumulator.content:
-                                        all_messages.append(follow_up_accumulator)
-
-                                    if stream:
-                                        yield all_messages
-                                    break
-
-                                if "<think>" in chunk_text and not follow_up_in_thinking:
-                                    follow_up_in_thinking = True
-                                    follow_up_thinking_start = time.time()
-                                    follow_up_thinking_message = ChatMessage(
-                                        role="assistant",
-                                        content="",
-                                        metadata={"title": "Follow-up Thinking", "id": 2, "status": "pending"}
-                                    )
-
-                                    think_start_idx = chunk_text.find("<think>") + len("<think>")
-                                    before_think = chunk_text[:chunk_text.find("<think>")]
-
-                                    if before_think:
-                                        follow_up_final_parts.append(before_think)
-                                        follow_up_accumulator.content = ''.join(follow_up_final_parts)
-
-                                    if think_start_idx < len(chunk_text):
-                                        follow_up_thinking_parts.append(chunk_text[think_start_idx:])
-                                        follow_up_thinking_message.content = ''.join(follow_up_thinking_parts)
-
-                                    if stream:
-                                        all_messages = list(final_messages) + [function_message, follow_up_thinking_message]
-                                        yield all_messages
-                                    continue
-
-                                elif follow_up_in_thinking and "</think>" not in chunk_text:
-                                    follow_up_thinking_parts.append(chunk_text)
-                                    follow_up_thinking_message.content = ''.join(follow_up_thinking_parts)
-
-                                    if stream:
-                                        all_messages = list(final_messages) + [function_message, follow_up_thinking_message]
-                                        yield all_messages
-                                    continue
-
-                                elif follow_up_in_thinking and "</think>" in chunk_text:
-                                    think_end_idx = chunk_text.find("</think>")
-                                    follow_up_thinking_parts.append(chunk_text[:think_end_idx])
-                                    follow_up_thinking_message.content = ''.join(follow_up_thinking_parts)
-                                    follow_up_thinking_message.metadata["status"] = "done"
-                                    follow_up_thinking_message.metadata["duration"] = time.time() - follow_up_thinking_start
-
-                                    remaining_content = chunk_text[think_end_idx + len("</think>"):]
-                                    if remaining_content.strip():
-                                        follow_up_final_parts.append(remaining_content)
-                                        follow_up_accumulator.content = ''.join(follow_up_final_parts)
-
-                                    if stream:
-                                        all_messages = list(final_messages) + [function_message, follow_up_thinking_message]
-                                        if follow_up_accumulator.content:
-                                            all_messages.append(follow_up_accumulator)
-                                        yield all_messages
-
-                                    follow_up_in_thinking = False
-                                    continue
-
-                                elif not follow_up_in_thinking:
-                                    if "<think>" in chunk_text and "</think>" in chunk_text:
-                                        think_match = re.search(r'<think>(.*?)</think>', chunk_text, re.DOTALL)
-                                        if think_match:
-                                            extracted_thinking = think_match.group(1)
-                                            follow_up_thinking_message = ChatMessage(
-                                                role="assistant",
-                                                content=extracted_thinking,
-                                                metadata={
-                                                    "title": "Follow-up Thought",
-                                                    "id": 2,
-                                                    "status": "done",
-                                                    "duration": 0.1
-                                                }
-                                            )
-
-                                            before_think = chunk_text[:chunk_text.find("<think>")]
-                                            after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
-
-                                            if before_think:
-                                                follow_up_final_parts.append(before_think)
-                                            if after_think:
-                                                follow_up_final_parts.append(after_think)
-                                            follow_up_accumulator.content = ''.join(follow_up_final_parts)
-
-                                            if stream:
-                                                all_messages = list(final_messages) + [function_message, follow_up_thinking_message]
-                                                if follow_up_accumulator.content:
-                                                    all_messages.append(follow_up_accumulator)
-                                                yield all_messages
-                                            continue
-                                    else:
-                                        follow_up_final_parts.append(chunk_text)
-                                        follow_up_accumulator.content = ''.join(follow_up_final_parts)
-
-                                        if stream:
-                                            all_messages = list(final_messages) + [function_message]
-                                            if follow_up_thinking_message and follow_up_thinking_message.metadata.get("status") == "done":
-                                                all_messages.append(follow_up_thinking_message)
-                                            if follow_up_accumulator.content:
-                                                all_messages.append(follow_up_accumulator)
-                                            yield all_messages
-
-                        if not stream:
-                            all_messages = list(final_messages) + [function_message]
-                            if follow_up_thinking_message and follow_up_thinking_message.metadata.get("status") == "done":
-                                all_messages.append(follow_up_thinking_message)
-                            if follow_up_accumulator.content:
-                                all_messages.append(follow_up_accumulator)
-                            yield all_messages
-
+                    if not stream:
+                        all_messages = follow_up_session.base_messages + follow_up_session.final_messages
+                        yield all_messages
     except Exception as e:
         logger.exception("Error in handle_chat:")
         raise gr.Error(str(e))
@@ -1624,7 +1340,7 @@ def handle_completion(prompt: str,
                       stream: bool = True):
     try:
         model = get_loaded_model()
-        if isinstance(model, VisionModel) or isinstance(model, OpenAIModel):
+        if isinstance(model, VisionModel):
             raise RuntimeError("Not supported yet.")
 
         temperature = float(temperature)
@@ -1771,13 +1487,6 @@ def add_model(model_name: Optional[str], original_repo: str, mlx_repo: str, quan
         raise gr.Error(str(e))
 
 
-def add_api_model(model_name: str, api_key: str, nick_name: Optional[str] = None, base_url: Optional[str] = None, system_prompt: Optional[str] = None):
-    try:
-        model_manager.add_api_config(model_name, api_key, nick_name=nick_name, base_url=base_url, system_prompt=system_prompt)
-    except Exception as e:
-        raise gr.Error(str(e))
-
-
 def update_slider_config(slider_new_min: Union[int, float], slider_new_max: Union[int, float], slider_value: Union[int, float]):
     if not slider_new_min or not slider_new_max:
         return gr.update()
@@ -1803,8 +1512,6 @@ def update_model_max_length(slider_value: Union[int, float]):
     try:
         model = get_loaded_model()
         if model is not None:
-            if isinstance(model, OpenAIModel):
-                return update_slider_config(1, 1048576, slider_value)
             try:
                 model_max_length = 32768
                 if isinstance(model, TextModel) or isinstance(model, VisionModel):
@@ -2277,7 +1984,7 @@ def setup_model_sync_events(chat_selector, completion_selector, chat_load_btn, c
     )
 
 
-def setup_model_management_events(local_form, api_form, model_list, chat_selector, completion_selector):
+def setup_model_management_events(local_form, model_list, chat_selector, completion_selector):
     local_form['add_button'].click(
         fn=add_model,
         inputs=[
@@ -2288,26 +1995,6 @@ def setup_model_management_events(local_form, api_form, model_list, chat_selecto
             local_form['default_language'],
             local_form['system_prompt'],
             local_form['multimodal']
-        ]
-    ).then(
-        fn=update_model_management_models_list,
-        outputs=[model_list]
-    ).then(
-        fn=update_model_selector_choices,
-        outputs=[chat_selector]
-    ).then(
-        fn=update_model_selector_choices,
-        outputs=[completion_selector]
-    )
-
-    api_form['add_button'].click(
-        fn=add_api_model,
-        inputs=[
-            api_form['model_name'],
-            api_form['api_key'],
-            api_form['nick_name'],
-            api_form['base_url'],
-            api_form['system_prompt']
         ]
     ).then(
         fn=update_model_management_models_list,
@@ -2573,21 +2260,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         )
     }
 
-    api_model_form = {
-        'model_name': create_textbox("Page.ModelManagement.AddAPIModelBlock.Textbox.model_name.label",
-                                     "Page.ModelManagement.AddAPIModelBlock.Textbox.model_name.placeholder"),
-        'nick_name': create_textbox("Page.ModelManagement.AddAPIModelBlock.Textbox.nick_name.label"),
-        'api_key': create_textbox("Page.ModelManagement.AddAPIModelBlock.Textbox.api_key.label",
-                                  "Page.ModelManagement.AddAPIModelBlock.Textbox.api_key.placeholder"),
-        'base_url': create_textbox("Page.ModelManagement.AddAPIModelBlock.Textbox.base_url.label",
-                                   "Page.ModelManagement.AddAPIModelBlock.Textbox.base_url.placeholder"),
-        'system_prompt': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.default_system_prompt.label"),
-        'add_button': gr.Button(
-            value=get_text("Page.ModelManagement.AddLocalModelBlock.Button.add.value"),
-            render=False
-        )
-    }
-
     model_list = gr.Dataframe(
         headers=[get_text("Page.ModelManagement.Dataframe.model_list.headers")],
         value=update_model_management_models_list(),
@@ -2808,13 +2480,8 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 model_list.render()
 
             with gr.Column(scale=5):
-                with gr.Tab(get_text("Page.ModelManagement.Tab.local_model")):
-                    for component in local_model_form.values():
-                        component.render()
-
-                with gr.Tab(get_text("Page.ModelManagement.Tab.openai_api")):
-                    for component in api_model_form.values():
-                        component.render()
+                for component in local_model_form.values():
+                    component.render()
 
     setup_model_sync_events(
         chat_model_selector, completion_model_selector,
@@ -2825,7 +2492,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     )
 
     setup_model_management_events(
-        local_model_form, api_model_form, model_list,
+        local_model_form, model_list,
         chat_model_selector, completion_model_selector
     )
 
