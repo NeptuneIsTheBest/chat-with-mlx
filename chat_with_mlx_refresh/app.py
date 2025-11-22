@@ -3,11 +3,8 @@ import atexit
 import base64
 import copy
 import hashlib
-import json
 import logging
-import re
 import threading
-import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Tuple, Optional, Union
@@ -15,6 +12,7 @@ from typing import Any, Callable, Dict, List, Tuple, Optional, Union
 import chromadb
 import gradio as gr
 from gradio.components.chatbot import ChatMessage
+from huggingface_hub import HfApi
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from pandas import DataFrame
 from sentence_transformers import SentenceTransformer
@@ -1465,6 +1463,44 @@ def get_default_system_prompt_callback():
         raise gr.Error("No model loaded.")
 
 
+
+def search_huggingface_models(query: str) -> DataFrame:
+    if not query:
+        return DataFrame(columns=get_text("Page.ModelManagement.Dataframe.search_results.headers"))
+
+    api = HfApi()
+    try:
+        models = api.list_models(search=query, filter="mlx", sort="likes", direction=-1, limit=50)
+        data = []
+        for model in models:
+            data.append([model.modelId, model.likes, model.downloads])
+        return DataFrame(data, columns=get_text("Page.ModelManagement.Dataframe.search_results.headers"))
+    except Exception as e:
+        logger.error(f"Error searching HuggingFace: {e}")
+        return DataFrame(columns=get_text("Page.ModelManagement.Dataframe.search_results.headers"))
+
+
+def auto_fill_model_info(evt: gr.SelectData, df: DataFrame):
+    if evt.index[0] < 0 or evt.index[0] >= len(df):
+        return gr.update(), gr.update(), gr.update(), gr.update()
+
+    model_id = df.iloc[evt.index[0]]["Model ID"]
+    model_name = model_id.split("/")[-1]
+
+    quantize = "None"
+    lower_name = model_name.lower()
+    if "4bit" in lower_name:
+        quantize = "4bit"
+    elif "8bit" in lower_name:
+        quantize = "8bit"
+    elif "q4" in lower_name:
+        quantize = "4bit"
+    elif "q8" in lower_name:
+        quantize = "8bit"
+
+    return model_name, model_id, model_id, quantize
+
+
 def update_model_management_models_list():
     return DataFrame({get_text("Page.ModelManagement.Dataframe.model_list.headers"): model_manager.get_model_list()})
 
@@ -1985,6 +2021,23 @@ def setup_model_sync_events(chat_selector, completion_selector, chat_load_btn, c
 
 
 def setup_model_management_events(local_form, model_list, chat_selector, completion_selector):
+    local_form['search_button'].click(
+        fn=search_huggingface_models,
+        inputs=[local_form['search_query']],
+        outputs=[local_form['search_results']]
+    )
+
+    local_form['search_results'].select(
+        fn=auto_fill_model_info,
+        inputs=[local_form['search_results']],
+        outputs=[
+            local_form['model_name'],
+            local_form['original_repo'],
+            local_form['mlx_repo'],
+            local_form['quantize']
+        ]
+    )
+
     local_form['add_button'].click(
         fn=add_model,
         inputs=[
@@ -2227,6 +2280,9 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     completion_params = create_generation_params()
 
     local_model_form = {
+        'search_query': gr.Textbox(label=get_text("Page.ModelManagement.AddLocalModelBlock.Textbox.search_query.label"), placeholder=get_text("Page.ModelManagement.AddLocalModelBlock.Textbox.search_query.placeholder"), render=False),
+        'search_button': gr.Button(value=get_text("Page.ModelManagement.AddLocalModelBlock.Button.search.value"), render=False),
+        'search_results': gr.Dataframe(headers=get_text("Page.ModelManagement.Dataframe.search_results.headers"), datatype=["str", "number", "number"], interactive=False, render=False),
         'model_name': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.label",
                                      "Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.placeholder"),
         'original_repo': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.original_repo.label",

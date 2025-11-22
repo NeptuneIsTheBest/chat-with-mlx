@@ -153,10 +153,17 @@ MULTI_LANGUAGE = {
                 "Dataframe": {
                     "model_list": {
                         "headers": "Models"
+                    },
+                    "search_results": {
+                        "headers": ["Model ID", "Likes", "Downloads"]
                     }
                 },
                 "AddLocalModelBlock": {
                     "Textbox": {
+                        "search_query": {
+                            "label": "Search HuggingFace (MLX Models)",
+                            "placeholder": "e.g. llama"
+                        },
                         "model_name": {
                             "label": "Model name",
                             "placeholder": "If empty, it will be set to the repository name of MLX Community."
@@ -185,6 +192,9 @@ MULTI_LANGUAGE = {
                         }
                     },
                     "Button": {
+                        "search": {
+                            "value": "Search"
+                        },
                         "add": {
                             "value": "Add model"
                         }
