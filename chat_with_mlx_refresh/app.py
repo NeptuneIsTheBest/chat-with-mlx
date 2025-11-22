@@ -781,20 +781,6 @@ import time
 import json
 import re
 
-# 假定以下对象在你的环境中可用（与原函数相同的依赖）：
-# - get_loaded_model
-# - VisionModel
-# - prepare_generic_model_inputs
-# - function_manager
-# - generation_stop_event
-# - ChatMessage
-# - logger
-# - gr
-
-# -----------------------------
-# 常量与可复用工具
-# -----------------------------
-
 CHATML_CONTROL_TOKENS = [
     '<|im_start|>', '<|im_end|>',
     '<|system|>', '<|user|>', '<|assistant|>',
@@ -802,7 +788,6 @@ CHATML_CONTROL_TOKENS = [
 ]
 CHATML_STOP_TOKENS = ['<|im_end|>', '<|end|>', '<|endoftext|>']
 
-# 为了避免分块拆到未闭合标签的中间，拦截所有可能的前缀
 DEFAULT_PARTIAL_PREFIXES = [
     "<", "<t", "<th", "<thi", "<thin", "<think",
     "</", "</t", "</th", "</thi", "</thin", "</think",
@@ -812,11 +797,7 @@ DEFAULT_PARTIAL_PREFIXES = [
     "<function_", "<function_c", "<function_ca", "<function_cal", "<function_call"
 ]
 
-
 def apply_rag_if_needed(message: Dict, rag_enabled: bool, rag_n_results: int) -> Dict:
-    """
-    根据 RAG 配置增强 message.text。
-    """
     if rag_enabled and message.get("text"):
         original_text = message.get("text", "")
         enhanced_text = enhance_message_with_rag(original_text, rag_enabled, rag_n_results)
@@ -827,9 +808,6 @@ def apply_rag_if_needed(message: Dict, rag_enabled: bool, rag_n_results: int) ->
 
 
 def ensure_model_has_chat_template(model) -> None:
-    """
-    检查模型及其 tokenizer 是否具备 chat_template。
-    """
     tokenizer_to_check = None
     if isinstance(model, VisionModel):
         if getattr(model, "processor", None) and hasattr(model.processor, "tokenizer"):
@@ -852,9 +830,6 @@ def normalize_sampling_params(
     min_p: float,
     repetition_penalty: float
 ) -> Dict[str, float]:
-    """
-    将采样参数规范为正确类型。
-    """
     return {
         "temperature": float(temperature),
         "top_k": int(top_k),
@@ -865,9 +840,6 @@ def normalize_sampling_params(
 
 
 def get_eos_token_from_model(model) -> Optional[str]:
-    """
-    基于是否是视觉模型，返回 eos_token。
-    """
     if isinstance(model, VisionModel):
         if getattr(model, "processor", None) and getattr(model.processor, "tokenizer", None):
             return model.processor.tokenizer.eos_token
@@ -876,9 +848,6 @@ def get_eos_token_from_model(model) -> Optional[str]:
 
 
 def parse_chunk_text(chunk) -> str:
-    """
-    将多种 chunk 类型统一解析为字符串。
-    """
     if isinstance(chunk, str):
         return chunk
     if hasattr(chunk, "text"):
@@ -892,9 +861,6 @@ def parse_chunk_text(chunk) -> str:
 
 
 def trim_to_eos_if_streaming(text: str, eos_token: Optional[str], stream: bool) -> (str, bool):
-    """
-    在流式模式下，如遇到 eos_token，返回截断文本与是否应在本 chunk 后停止。
-    """
     if stream and eos_token and eos_token in text:
         if text == eos_token:
             return "", True
@@ -908,9 +874,6 @@ def filter_chatml_tokens_and_stop(
     control_tokens: List[str],
     stop_tokens: List[str]
 ) -> (str, bool):
-    """
-    过滤 ChatML 控制 token；若发现停止 token，则截断并标记应停止。
-    """
     should_stop = False
     filtered = text
 
@@ -928,9 +891,6 @@ def filter_chatml_tokens_and_stop(
 
 
 def strip_answer_tags(text: str) -> str:
-    """
-    去除 <answer> 标签对。
-    """
     return text.replace("<answer>", "").replace("</answer>", "")
 
 
@@ -939,10 +899,6 @@ def merge_with_partial_buffer(
     text: str,
     partial_prefixes: List[str]
 ) -> (str, str):
-    """
-    处理上次遗留的半截标签与本次文本拼接，并将本次末尾半截标签缓存。
-    返回 (可安全消费的文本, 新的缓存)。
-    """
     text = f"{prior_buffer}{text}" if prior_buffer else text
     new_buffer = ""
     if not text:
@@ -950,37 +906,24 @@ def merge_with_partial_buffer(
 
     for partial in partial_prefixes:
         if text.endswith(partial):
-            # 将半截标签移入 buffer，避免外部消费
             new_buffer = partial
             text = text[:-len(partial)]
             break
     return text, new_buffer
 
-
-# -----------------------------
-# 统一的流式解析 Session
-# -----------------------------
-
 @dataclass
 class StreamSession:
-    """
-    负责将模型的 response_stream 解析为
-    - thinking_message（<think> 内）与
-    - chat_message_accumulator（最终展示内容）
-    并在流式模式下按需增量 yield。
-    """
     response_stream: Iterable
     eos_token: Optional[str]
     stream: bool
-    generation_stop_event: any  # threading.Event 或类似对象
+    generation_stop_event: any
     control_tokens: List[str] = field(default_factory=lambda: CHATML_CONTROL_TOKENS)
     stop_tokens: List[str] = field(default_factory=lambda: CHATML_STOP_TOKENS)
     partial_prefixes: List[str] = field(default_factory=lambda: DEFAULT_PARTIAL_PREFIXES)
     thinking_title: str = "Thinking"
     inline_thought_title: str = "Thinking"
     thinking_id: int = 0
-    base_messages: List = field(default_factory=list)  # 每次 yield 时统一前缀
-    # 运行时状态
+    base_messages: List = field(default_factory=list)
     chat_message_accumulator: any = field(default_factory=lambda: ChatMessage(role="assistant", content=""))
     thinking_message: Optional[any] = None
     full_response: str = ""
@@ -997,29 +940,24 @@ class StreamSession:
             if self.generation_stop_event.is_set():
                 break
 
-            # 统一解析 chunk 文本
             chunk_text = parse_chunk_text(chunk)
             if not chunk_text:
                 continue
 
             self.full_response += chunk_text
 
-            # 流式时遇到 eos_token 则截断并标记本轮后停止
             chunk_text, eos_hit = trim_to_eos_if_streaming(chunk_text, self.eos_token, self.stream)
 
-            # 合并半截标签，提取可消费文本
             chunk_text, chunk_buffer = merge_with_partial_buffer(chunk_buffer, chunk_text, self.partial_prefixes)
             if not chunk_text:
                 if eos_hit:
                     break
                 continue
 
-            # 过滤 ChatML 与 <answer> 标签
             chunk_text, should_stop = filter_chatml_tokens_and_stop(chunk_text, self.control_tokens, self.stop_tokens)
             chunk_text = strip_answer_tags(chunk_text)
 
             if should_stop:
-                # 已遇到停止 token，将当前内容收尾并一次性输出
                 if in_thinking:
                     thinking_content_parts.append(chunk_text)
                     self._ensure_thinking_message(thinking_title=self.thinking_title, status="pending")
@@ -1038,7 +976,6 @@ class StreamSession:
                             yield self.base_messages + [self.chat_message_accumulator]
                 break
 
-            # <think> 开始（且之前不在思考中）
             if "<think>" in chunk_text and not in_thinking:
                 in_thinking = True
                 thinking_start_time = time.time()
@@ -1057,11 +994,9 @@ class StreamSession:
                     self.thinking_message.content = "".join(thinking_content_parts)
 
                 if self.stream:
-                    # 与原逻辑一致：此刻仅推送思考消息，不推送 before_think 已更新的回答
                     yield self.base_messages + [self.thinking_message]
                 continue
 
-            # 思考中，且未闭合
             if in_thinking and "</think>" not in chunk_text:
                 thinking_content_parts.append(chunk_text)
                 self._ensure_thinking_message(thinking_title=self.thinking_title, status="pending")
@@ -1070,7 +1005,6 @@ class StreamSession:
                     yield self.base_messages + [self.thinking_message]
                 continue
 
-            # 思考中，且本块闭合
             if in_thinking and "</think>" in chunk_text:
                 think_end_idx = chunk_text.find("</think>")
                 thinking_content_parts.append(chunk_text[:think_end_idx])
@@ -1092,9 +1026,7 @@ class StreamSession:
                 in_thinking = False
                 continue
 
-            # 不在思考中
             if not in_thinking:
-                # 同块内出现完整的 <think>...</think>
                 if "<think>" in chunk_text and "</think>" in chunk_text:
                     think_match = re.search(r"<think>(.*?)</think>", chunk_text, re.DOTALL)
                     if think_match:
@@ -1124,7 +1056,6 @@ class StreamSession:
                             yield payload
                         continue
 
-                # 普通回答内容
                 final_content_parts.append(chunk_text)
                 self.chat_message_accumulator.content = "".join(final_content_parts)
                 if self.stream:
@@ -1133,11 +1064,9 @@ class StreamSession:
                     else:
                         yield self.base_messages + [self.chat_message_accumulator]
 
-            # 流式模式下若刚刚截到 eos，本轮后停止
             if self.stream and eos_hit:
                 break
 
-        # 汇总最终消息（用于后续函数调用 / 非流式一次返回）
         if self.thinking_message and self.thinking_message.metadata.get("status") == "done":
             self.final_messages = [self.thinking_message]
             if self.chat_message_accumulator.content:
@@ -1152,11 +1081,6 @@ class StreamSession:
                 content="",
                 metadata={"title": thinking_title, "id": self.thinking_id, "status": status}
             )
-
-
-# -----------------------------
-# 重构后的 handle_chat
-# -----------------------------
 
 def handle_chat(message: Dict,
                 history: List[Dict],
