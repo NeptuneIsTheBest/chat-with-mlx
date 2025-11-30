@@ -348,14 +348,12 @@ class ModelManager:
             raise RuntimeError(f"Failed to save config to {config_path}: {e}")
 
     def add_config(self,
-                   original_repo: str,
                    mlx_repo: str,
                    model_name: Optional[str] = None,
                    quantize: str = "None",
                    default_language: str = "multi",
                    system_prompt: Optional[str] = None,
                    multimodal_ability: Optional[List[str]] = None) -> None:
-        self._validate_repo_format(original_repo, "original_repo")
         self._validate_repo_format(mlx_repo, "mlx_repo")
         self._validate_quantize(quantize)
 
@@ -369,7 +367,6 @@ class ModelManager:
                             self._extract_repo_name(mlx_repo))
 
         model_config = {
-            "original_repo": original_repo.strip(),
             "mlx_repo": mlx_repo.strip(),
             "model_name": final_model_name,
             "quantize": None if quantize == "None" else quantize,
@@ -390,24 +387,13 @@ class ModelManager:
         return abilities
 
     def delete_config(self, model_name: str, delete_model_files: bool = False) -> None:
-        """Delete a model configuration and optionally delete model files.
-        
-        Args:
-            model_name: The display name of the model to delete
-            delete_model_files: Whether to also delete the downloaded model files
-        
-        Raises:
-            RuntimeError: If the model is not found or deletion fails
-        """
         model_config = self.model_configs.get(model_name)
         if not model_config:
             raise RuntimeError(f"Model '{model_name}' not found")
-        
-        # Close the model if it's currently loaded
+
         if self.model_config and self.model_config.get("display_name") == model_name:
             self.close_model()
         
-        # Delete the config file
         config_path = self.get_config_path(model_config)
         try:
             if config_path.exists():
@@ -416,7 +402,6 @@ class ModelManager:
         except OSError as e:
             raise RuntimeError(f"Failed to delete config file {config_path}: {e}")
         
-        # Delete model files if requested
         if delete_model_files:
             model_path = self.get_model_path(model_config)
             try:
@@ -427,7 +412,6 @@ class ModelManager:
             except OSError as e:
                 logging.warning(f"Failed to delete model files {model_path}: {e}")
         
-        # Remove from in-memory configs
         del self.model_configs[model_name]
 
     def _load_config_file(self, config_file: Path) -> Optional[Dict]:

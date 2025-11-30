@@ -1406,7 +1406,7 @@ def search_huggingface_models(query: str) -> DataFrame:
 
 def auto_fill_model_info(evt: gr.SelectData, df: DataFrame):
     if evt.index[0] < 0 or evt.index[0] >= len(df):
-        return gr.update(), gr.update(), gr.update(), gr.update()
+        return gr.update(), gr.update(), gr.update()
 
     model_id = df.iloc[evt.index[0]]["Model ID"]
     model_name = model_id.split("/")[-1]
@@ -1422,7 +1422,7 @@ def auto_fill_model_info(evt: gr.SelectData, df: DataFrame):
     elif "q8" in lower_name:
         quantize = "8bit"
 
-    return model_name, model_id, model_id, quantize
+    return model_name, model_id, quantize
 
 
 def update_model_management_models_list():
@@ -1441,13 +1441,12 @@ def update_model_selector_choices():
 
 
 def update_delete_model_selector_choices():
-    """Update the delete model selector choices with the current model list."""
     return gr.update(choices=model_manager.get_model_list())
 
 
-def add_model(model_name: Optional[str], original_repo: str, mlx_repo: str, quantize: str, default_language: str, default_system_prompt: Optional[str], multimodal_ability: List[str]):
+def add_model(model_name: Optional[str], mlx_repo: str, quantize: str, default_language: str, default_system_prompt: Optional[str], multimodal_ability: List[str]):
     try:
-        model_manager.add_config(original_repo, mlx_repo, model_name, quantize, default_language, default_system_prompt, multimodal_ability)
+        model_manager.add_config(mlx_repo, model_name, quantize, default_language, default_system_prompt, multimodal_ability)
     except Exception as e:
         raise gr.Error(str(e))
 
@@ -1976,7 +1975,6 @@ def setup_model_management_events(local_form, model_list, chat_selector, complet
         inputs=[local_form['search_results']],
         outputs=[
             local_form['model_name'],
-            local_form['original_repo'],
             local_form['mlx_repo'],
             local_form['quantize']
         ]
@@ -1986,7 +1984,6 @@ def setup_model_management_events(local_form, model_list, chat_selector, complet
         fn=add_model,
         inputs=[
             local_form['model_name'],
-            local_form['original_repo'],
             local_form['mlx_repo'],
             local_form['quantize'],
             local_form['default_language'],
@@ -2253,8 +2250,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         'search_results': gr.Dataframe(headers=get_text("Page.ModelManagement.Dataframe.search_results.headers"), datatype=["str", "number", "number"], interactive=False, render=False),
         'model_name': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.label",
                                      "Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.placeholder"),
-        'original_repo': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.original_repo.label",
-                                        "Page.ModelManagement.AddLocalModelBlock.Textbox.original_repo.placeholder"),
         'mlx_repo': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.mlx_repo.label",
                                    "Page.ModelManagement.AddLocalModelBlock.Textbox.mlx_repo.placeholder"),
         'quantize': gr.Dropdown(
@@ -2532,7 +2527,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 local_model_form['search_button'].render()
                 local_model_form['search_results'].render()
                 local_model_form['model_name'].render()
-                local_model_form['original_repo'].render()
                 local_model_form['mlx_repo'].render()
                 local_model_form['quantize'].render()
                 local_model_form['default_language'].render()

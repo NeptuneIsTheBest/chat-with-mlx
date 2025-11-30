@@ -168,13 +168,9 @@ MULTI_LANGUAGE = {
                             "label": "Model name",
                             "placeholder": "If empty, it will be set to the repository name of MLX Community."
                         },
-                        "original_repo": {
-                            "label": "Original Repository",
-                            "placeholder": "The original repository. It should look like microsoft/Phi-3.5-vision-instruct."
-                        },
                         "mlx_repo": {
-                            "label": "MLX Community Repository",
-                            "placeholder": "The MLX community Repository. It should look like mlx-community/Phi-3.5-vision-instruct-8bit."
+                            "label": "MLX Repository",
+                            "placeholder": "The MLX repository. It should look like mlx-community/Phi-3.5-vision-instruct-8bit."
                         },
                         "default_system_prompt": {
                             "label": "Default System Prompt"
