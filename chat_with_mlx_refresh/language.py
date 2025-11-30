@@ -197,7 +197,36 @@ MULTI_LANGUAGE = {
                         },
                         "add": {
                             "value": "Add model"
+                        },
+                        "delete": {
+                            "value": "Delete Model"
                         }
+                    }
+                },
+                "DeleteModelBlock": {
+                    "Markdown": {
+                        "add_model": "Add Model",
+                        "delete_model": "Delete Model"
+                    },
+                    "Dropdown": {
+                        "model_selector": {
+                            "label": "Select Model to Delete"
+                        }
+                    },
+                    "Checkbox": {
+                        "delete_files": {
+                            "label": "Also delete model files (recommended to free disk space)"
+                        }
+                    },
+                    "Textbox": {
+                        "delete_status": {
+                            "label": "Delete Status"
+                        }
+                    },
+                    "Messages": {
+                        "no_model_selected": "Please select a model to delete",
+                        "config_deleted": "Model configuration '{}' has been deleted successfully.",
+                        "config_and_files_deleted": "Model '{}' and its files have been deleted successfully."
                     }
                 }
             }

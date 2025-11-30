@@ -389,6 +389,47 @@ class ModelManager:
             return []
         return abilities
 
+    def delete_config(self, model_name: str, delete_model_files: bool = False) -> None:
+        """Delete a model configuration and optionally delete model files.
+        
+        Args:
+            model_name: The display name of the model to delete
+            delete_model_files: Whether to also delete the downloaded model files
+        
+        Raises:
+            RuntimeError: If the model is not found or deletion fails
+        """
+        model_config = self.model_configs.get(model_name)
+        if not model_config:
+            raise RuntimeError(f"Model '{model_name}' not found")
+        
+        # Close the model if it's currently loaded
+        if self.model_config and self.model_config.get("display_name") == model_name:
+            self.close_model()
+        
+        # Delete the config file
+        config_path = self.get_config_path(model_config)
+        try:
+            if config_path.exists():
+                config_path.unlink()
+                logging.info(f"Deleted config file: {config_path}")
+        except OSError as e:
+            raise RuntimeError(f"Failed to delete config file {config_path}: {e}")
+        
+        # Delete model files if requested
+        if delete_model_files:
+            model_path = self.get_model_path(model_config)
+            try:
+                if model_path.exists():
+                    import shutil
+                    shutil.rmtree(model_path)
+                    logging.info(f"Deleted model files: {model_path}")
+            except OSError as e:
+                logging.warning(f"Failed to delete model files {model_path}: {e}")
+        
+        # Remove from in-memory configs
+        del self.model_configs[model_name]
+
     def _load_config_file(self, config_file: Path) -> Optional[Dict]:
         try:
             with config_file.open("r", encoding="utf-8") as f:

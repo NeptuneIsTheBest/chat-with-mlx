@@ -1440,9 +1440,29 @@ def update_model_selector_choices():
     return gr.update(choices=model_manager.get_model_list(), value=update_select_model_dropdown_value())
 
 
+def update_delete_model_selector_choices():
+    """Update the delete model selector choices with the current model list."""
+    return gr.update(choices=model_manager.get_model_list())
+
+
 def add_model(model_name: Optional[str], original_repo: str, mlx_repo: str, quantize: str, default_language: str, default_system_prompt: Optional[str], multimodal_ability: List[str]):
     try:
         model_manager.add_config(original_repo, mlx_repo, model_name, quantize, default_language, default_system_prompt, multimodal_ability)
+    except Exception as e:
+        raise gr.Error(str(e))
+
+
+def delete_model(model_name: str, delete_files: bool) -> str:
+    try:
+        if not model_name:
+            raise gr.Error(get_text("Page.ModelManagement.DeleteModelBlock.Messages.no_model_selected"))
+        
+        model_manager.delete_config(model_name, delete_model_files=delete_files)
+        
+        if delete_files:
+            return get_text("Page.ModelManagement.DeleteModelBlock.Messages.config_and_files_deleted").format(model_name)
+        else:
+            return get_text("Page.ModelManagement.DeleteModelBlock.Messages.config_deleted").format(model_name)
     except Exception as e:
         raise gr.Error(str(e))
 
@@ -1982,6 +2002,30 @@ def setup_model_management_events(local_form, model_list, chat_selector, complet
     ).then(
         fn=update_model_selector_choices,
         outputs=[completion_selector]
+    ).then(
+        fn=update_delete_model_selector_choices,
+        outputs=[local_form['delete_model_selector']]
+    )
+
+    local_form['delete_button'].click(
+        fn=delete_model,
+        inputs=[
+            local_form['delete_model_selector'],
+            local_form['delete_files_checkbox']
+        ],
+        outputs=[local_form['delete_status']]
+    ).then(
+        fn=update_model_management_models_list,
+        outputs=[model_list]
+    ).then(
+        fn=update_model_selector_choices,
+        outputs=[chat_selector]
+    ).then(
+        fn=update_model_selector_choices,
+        outputs=[completion_selector]
+    ).then(
+        fn=update_delete_model_selector_choices,
+        outputs=[local_form['delete_model_selector']]
     )
 
 
@@ -2237,6 +2281,29 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         'add_button': gr.Button(
             value=get_text("Page.ModelManagement.AddLocalModelBlock.Button.add.value"),
             render=False
+        ),
+        'delete_model_selector': gr.Dropdown(
+            label=get_text("Page.ModelManagement.DeleteModelBlock.Dropdown.model_selector.label"),
+            choices=model_manager.get_model_list(),
+            value=None,
+            interactive=True,
+            render=False
+        ),
+        'delete_files_checkbox': gr.Checkbox(
+            label=get_text("Page.ModelManagement.DeleteModelBlock.Checkbox.delete_files.label"),
+            value=False,
+            interactive=True,
+            render=False
+        ),
+        'delete_button': gr.Button(
+            value=get_text("Page.ModelManagement.AddLocalModelBlock.Button.delete.value"),
+            variant="stop",
+            render=False
+        ),
+        'delete_status': gr.Textbox(
+            label=get_text("Page.ModelManagement.DeleteModelBlock.Textbox.delete_status.label"),
+            interactive=False,
+            render=False
         )
     }
 
@@ -2460,8 +2527,24 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 model_list.render()
 
             with gr.Column(scale=5):
-                for component in local_model_form.values():
-                    component.render()
+                gr.Markdown(f"## {get_text('Page.ModelManagement.DeleteModelBlock.Markdown.add_model')}")
+                local_model_form['search_query'].render()
+                local_model_form['search_button'].render()
+                local_model_form['search_results'].render()
+                local_model_form['model_name'].render()
+                local_model_form['original_repo'].render()
+                local_model_form['mlx_repo'].render()
+                local_model_form['quantize'].render()
+                local_model_form['default_language'].render()
+                local_model_form['system_prompt'].render()
+                local_model_form['multimodal'].render()
+                local_model_form['add_button'].render()
+                
+                gr.Markdown(f"## {get_text('Page.ModelManagement.DeleteModelBlock.Markdown.delete_model')}")
+                local_model_form['delete_model_selector'].render()
+                local_model_form['delete_files_checkbox'].render()
+                local_model_form['delete_button'].render()
+                local_model_form['delete_status'].render()
 
     setup_model_sync_events(
         chat_model_selector, completion_model_selector,
