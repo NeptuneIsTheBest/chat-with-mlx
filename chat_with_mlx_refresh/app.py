@@ -1097,6 +1097,208 @@ class StreamSession:
                 metadata={"title": thinking_title, "id": self.thinking_id, "status": status}
             )
 
+
+def generate_response_and_stream(
+    model: Union[TextModel, VisionModel],
+    response_args: Dict[str, Any],
+    eos_token: Optional[str],
+    stream: bool,
+    generation_stop_event: threading.Event,
+    thinking_title: str = "Thinking",
+    inline_thought_title: str = "Thinking",
+    thinking_id: int = 0,
+    base_messages: List = None
+) -> Iterator[List[Dict]]:
+    if base_messages is None:
+        base_messages = []
+
+    response_stream = model.generate_response(**response_args)
+    session = StreamSession(
+        response_stream=response_stream,
+        eos_token=eos_token,
+        stream=stream,
+        generation_stop_event=generation_stop_event,
+        thinking_title=thinking_title,
+        inline_thought_title=inline_thought_title,
+        thinking_id=thinking_id,
+        base_messages=base_messages
+    )
+    for payload in session:
+        yield payload
+    
+    return session
+
+
+def process_function_calling_loop(
+    full_response: str,
+    session: StreamSession,
+    model: Union[TextModel, VisionModel],
+    history: List[Dict],
+    sampling_params: Dict[str, Any],
+    stream: bool,
+    max_tokens: int,
+    image_paths: List[str]
+) -> Iterator[List[Dict]]:
+    function_calls = function_manager.parse_function_call_from_response(full_response)
+    if not function_calls:
+        return
+
+    function_results = []
+    for idx, (function_name, function_args) in enumerate(function_calls):
+        result = function_manager.execute_function(function_name, function_args)
+        function_results.append({
+            "name": function_name,
+            "args": function_args,
+            "result": result
+        })
+
+    function_content_parts = []
+    for idx, func_result in enumerate(function_results):
+        function_content_parts.append(
+            f"**Function Call {idx + 1}:** `{func_result['name']}`\n"
+            f"**Arguments:** `{json.dumps(func_result['args'])}`\n"
+            f"**Result:** {json.dumps(func_result['result'])}"
+        )
+    
+    function_message = ChatMessage(
+        role="assistant",
+        content="\n\n---\n\n".join(function_content_parts),
+        metadata={"title": f"Function Call{'s' if len(function_results) > 1 else ''}", "id": 1, "status": "done"}
+    )
+
+    current_messages = list(session.final_messages) + [function_message]
+    if stream:
+        yield current_messages
+
+    all_succeeded = all("result" in func_result["result"] for func_result in function_results)
+    
+    if all_succeeded:
+        assistant_full_response = ""
+        if session.thinking_message and session.thinking_message.content:
+            function_names = ", ".join([fr["name"] for fr in function_results])
+            assistant_full_response = "<think>{}</think>\n{}".format(
+                session.thinking_message.content,
+                session.chat_message_accumulator.content or f"I'll call the following function(s): {function_names}."
+            )
+        else:
+            function_names = ", ".join([fr["name"] for fr in function_results])
+            assistant_full_response = session.chat_message_accumulator.content or f"I'll call the following function(s): {function_names}."
+
+        enhanced_history = history + [
+            {"role": "assistant", "content": assistant_full_response}
+        ]
+        
+        for func_result in function_results:
+            enhanced_history.append({
+                "role": "tool",
+                "content": json.dumps(func_result["result"]["result"]),
+                "name": func_result["name"]
+            })
+
+        max_iterations = 5
+        current_iteration = 0
+        current_base_messages = current_messages
+        
+        while current_iteration < max_iterations:
+            current_iteration += 1
+            
+            results_summary = []
+            for func_result in function_results:
+                results_summary.append(
+                    f"Function '{func_result['name']}' returned: {json.dumps(func_result['result']['result'])}"
+                )
+            
+            follow_up_prompt = (
+                f"Based on the function results:\n"
+                f"{chr(10).join(results_summary)}\n\n"
+                f"Please provide a helpful response to the user's original question. "
+                f"If you need to call more functions, you can do so."
+            )
+
+            follow_up_args = {
+                "message": follow_up_prompt,
+                "history": enhanced_history,
+                "stream": stream,
+                "max_tokens": max_tokens,
+                **sampling_params
+            }
+            if isinstance(model, VisionModel) and image_paths:
+                follow_up_args["images"] = image_paths
+
+            follow_up_session = yield from generate_response_and_stream(
+                model=model,
+                response_args=follow_up_args,
+                eos_token=session.eos_token,
+                stream=stream,
+                generation_stop_event=session.generation_stop_event,
+                thinking_title=f"Follow-up Thinking (Round {current_iteration})",
+                inline_thought_title=f"Follow-up Thought {current_iteration}",
+                thinking_id=2 + current_iteration,
+                base_messages=current_base_messages
+            )
+
+            follow_up_response = follow_up_session.full_response
+            new_function_calls = function_manager.parse_function_call_from_response(follow_up_response)
+            
+            if new_function_calls:
+                function_results = []
+                for idx, (function_name, function_args) in enumerate(new_function_calls):
+                    result = function_manager.execute_function(function_name, function_args)
+                    function_results.append({
+                        "name": function_name,
+                        "args": function_args,
+                        "result": result
+                    })
+
+                function_content_parts = []
+                for idx, func_result in enumerate(function_results):
+                    function_content_parts.append(
+                        f"**Function Call {idx + 1}:** `{func_result['name']}`\n"
+                        f"**Arguments:** `{json.dumps(func_result['args'])}`\n"
+                        f"**Result:** {json.dumps(func_result['result'])}"
+                    )
+                
+                new_function_message = ChatMessage(
+                    role="assistant",
+                    content="\n\n---\n\n".join(function_content_parts),
+                    metadata={"title": f"Function Call{'s' if len(function_results) > 1 else ''} (Round {current_iteration})", "id": 2 + current_iteration, "status": "done"}
+                )
+
+                current_base_messages = follow_up_session.base_messages + follow_up_session.final_messages + [new_function_message]
+                if stream:
+                    yield current_base_messages
+
+                all_succeeded = all("result" in func_result["result"] for func_result in function_results)
+                
+                if not all_succeeded:
+                    break
+                
+                follow_up_full_response = ""
+                if follow_up_session.thinking_message and follow_up_session.thinking_message.content:
+                    function_names = ", ".join([fr["name"] for fr in function_results])
+                    follow_up_full_response = "<think>{}</think>\n{}".format(
+                        follow_up_session.thinking_message.content,
+                        follow_up_session.chat_message_accumulator.content or f"I'll call: {function_names}."
+                    )
+                else:
+                    function_names = ", ".join([fr["name"] for fr in function_results])
+                    follow_up_full_response = follow_up_session.chat_message_accumulator.content or f"I'll call: {function_names}."
+
+                enhanced_history.append({"role": "assistant", "content": follow_up_full_response})
+                
+                for func_result in function_results:
+                    enhanced_history.append({
+                        "role": "tool",
+                        "content": json.dumps(func_result["result"]["result"]),
+                        "name": func_result["name"]
+                    })
+            else:
+                if not stream:
+                    all_messages = follow_up_session.base_messages + follow_up_session.final_messages
+                    yield all_messages
+                break
+
+
 def handle_chat(message: Dict,
                 history: List[Dict],
                 system_prompt: str = None,
@@ -1136,9 +1338,9 @@ def handle_chat(message: Dict,
             response_args["images"] = image_paths
         eos_token = get_eos_token_from_model(model)
 
-        response_stream = model.generate_response(**response_args)
-        session = StreamSession(
-            response_stream=response_stream,
+        session = yield from generate_response_and_stream(
+            model=model,
+            response_args=response_args,
             eos_token=eos_token,
             stream=stream,
             generation_stop_event=generation_stop_event,
@@ -1147,188 +1349,21 @@ def handle_chat(message: Dict,
             thinking_id=0,
             base_messages=[]
         )
-        for payload in session:
-            yield payload
 
         final_messages = session.final_messages
         full_response = session.full_response
 
         if function_calling_enabled and function_manager.is_enabled():
-            function_calls = function_manager.parse_function_call_from_response(full_response)
-            if function_calls:
-                # Execute all function calls
-                function_results = []
-                for idx, (function_name, function_args) in enumerate(function_calls):
-                    result = function_manager.execute_function(function_name, function_args)
-                    function_results.append({
-                        "name": function_name,
-                        "args": function_args,
-                        "result": result
-                    })
-
-                # Create a message showing all function calls
-                function_content_parts = []
-                for idx, func_result in enumerate(function_results):
-                    function_content_parts.append(
-                        f"**Function Call {idx + 1}:** `{func_result['name']}`\\n"
-                        f"**Arguments:** `{json.dumps(func_result['args'])}`\\n"
-                        f"**Result:** {json.dumps(func_result['result'])}"
-                    )
-                
-                function_message = ChatMessage(
-                    role="assistant",
-                    content="\\n\\n---\\n\\n".join(function_content_parts),
-                    metadata={"title": f"Function Call{'s' if len(function_results) > 1 else ''}", "id": 1, "status": "done"}
-                )
-
-                current_messages = list(final_messages) + [function_message]
-                if stream:
-                    yield current_messages
-
-                # Check if all function calls succeeded
-                all_succeeded = all("result" in func_result["result"] for func_result in function_results)
-                
-                if all_succeeded:
-                    # Prepare assistant response with all function calls
-                    assistant_full_response = ""
-                    if session.thinking_message and session.thinking_message.content:
-                        function_names = ", ".join([fr["name"] for fr in function_results])
-                        assistant_full_response = "<think>{}</think>\\n{}".format(
-                            session.thinking_message.content,
-                            session.chat_message_accumulator.content or f"I'll call the following function(s): {function_names}."
-                        )
-                    else:
-                        function_names = ", ".join([fr["name"] for fr in function_results])
-                        assistant_full_response = session.chat_message_accumulator.content or f"I'll call the following function(s): {function_names}."
-
-                    # Build enhanced history with all function results
-                    enhanced_history = processed_history_list + [
-                        {"role": "assistant", "content": assistant_full_response}
-                    ]
-                    
-                    # Add tool results to history
-                    for func_result in function_results:
-                        enhanced_history.append({
-                            "role": "tool",
-                            "content": json.dumps(func_result["result"]["result"]),
-                            "name": func_result["name"]
-                        })
-
-                    # Allow iterative function calling - up to 5 rounds
-                    max_iterations = 5
-                    current_iteration = 0
-                    current_base_messages = current_messages
-                    
-                    while current_iteration < max_iterations:
-                        current_iteration += 1
-                        
-                        # Build results summary
-                        results_summary = []
-                        for func_result in function_results:
-                            results_summary.append(
-                                f"Function '{func_result['name']}' returned: {json.dumps(func_result['result']['result'])}"
-                            )
-                        
-                        follow_up_prompt = (
-                            f"Based on the function results:\\n"
-                            f"{chr(10).join(results_summary)}\\n\\n"
-                            f"Please provide a helpful response to the user's original question. "
-                            f"If you need to call more functions, you can do so."
-                        )
-
-                        follow_up_args = {
-                            "message": follow_up_prompt,
-                            "history": enhanced_history,
-                            "stream": stream,
-                            "max_tokens": max_tokens,
-                            **sampling
-                        }
-                        if isinstance(model, VisionModel) and image_paths:
-                            follow_up_args["images"] = image_paths
-
-                        follow_up_response_stream = model.generate_response(**follow_up_args)
-
-                        follow_up_session = StreamSession(
-                            response_stream=follow_up_response_stream,
-                            eos_token=eos_token,
-                            stream=stream,
-                            generation_stop_event=generation_stop_event,
-                            thinking_title=f"Follow-up Thinking (Round {current_iteration})",
-                            inline_thought_title=f"Follow-up Thought {current_iteration}",
-                            thinking_id=2 + current_iteration,
-                            base_messages=current_base_messages
-                        )
-
-                        for payload in follow_up_session:
-                            yield payload
-
-                        # Check if the model wants to call more functions
-                        follow_up_response = follow_up_session.full_response
-                        new_function_calls = function_manager.parse_function_call_from_response(follow_up_response)
-                        
-                        if new_function_calls:
-                            # Execute new function calls
-                            function_results = []
-                            for idx, (function_name, function_args) in enumerate(new_function_calls):
-                                result = function_manager.execute_function(function_name, function_args)
-                                function_results.append({
-                                    "name": function_name,
-                                    "args": function_args,
-                                    "result": result
-                                })
-
-                            # Create message for new function calls
-                            function_content_parts = []
-                            for idx, func_result in enumerate(function_results):
-                                function_content_parts.append(
-                                    f"**Function Call {idx + 1}:** `{func_result['name']}`\\n"
-                                    f"**Arguments:** `{json.dumps(func_result['args'])}`\\n"
-                                    f"**Result:** {json.dumps(func_result['result'])}"
-                                )
-                            
-                            new_function_message = ChatMessage(
-                                role="assistant",
-                                content="\\n\\n---\\n\\n".join(function_content_parts),
-                                metadata={"title": f"Function Call{'s' if len(function_results) > 1 else ''} (Round {current_iteration})", "id": 2 + current_iteration, "status": "done"}
-                            )
-
-                            current_base_messages = follow_up_session.base_messages + follow_up_session.final_messages + [new_function_message]
-                            if stream:
-                                yield current_base_messages
-
-                            # Check if all function calls succeeded
-                            all_succeeded = all("result" in func_result["result"] for func_result in function_results)
-                            
-                            if not all_succeeded:
-                                # Stop if any function call failed
-                                break
-                            
-                            # Update enhanced history
-                            follow_up_full_response = ""
-                            if follow_up_session.thinking_message and follow_up_session.thinking_message.content:
-                                function_names = ", ".join([fr["name"] for fr in function_results])
-                                follow_up_full_response = "<think>{}</think>\\n{}".format(
-                                    follow_up_session.thinking_message.content,
-                                    follow_up_session.chat_message_accumulator.content or f"I'll call: {function_names}."
-                                )
-                            else:
-                                function_names = ", ".join([fr["name"] for fr in function_results])
-                                follow_up_full_response = follow_up_session.chat_message_accumulator.content or f"I'll call: {function_names}."
-
-                            enhanced_history.append({"role": "assistant", "content": follow_up_full_response})
-                            
-                            for func_result in function_results:
-                                enhanced_history.append({
-                                    "role": "tool",
-                                    "content": json.dumps(func_result["result"]["result"]),
-                                    "name": func_result["name"]
-                                })
-                        else:
-                            # No more function calls, we're done
-                            if not stream:
-                                all_messages = follow_up_session.base_messages + follow_up_session.final_messages
-                                yield all_messages
-                            break
+            yield from process_function_calling_loop(
+                full_response=full_response,
+                session=session,
+                model=model,
+                history=processed_history_list,
+                sampling_params=sampling,
+                stream=stream,
+                max_tokens=max_tokens,
+                image_paths=image_paths
+            )
 
     except Exception as e:
         logger.exception("Error in handle_chat:")
