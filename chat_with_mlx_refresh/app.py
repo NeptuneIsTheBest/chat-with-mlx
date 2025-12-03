@@ -2210,7 +2210,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         value=model_manager.get_system_prompt,
         lines=3,
         max_lines=5,
-        show_copy_button=True,
+        buttons=["copy"],
         render=False,
         scale=9
     )
@@ -2302,8 +2302,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         'function_list': gr.Dataframe(
             headers=["Name", "Description", "Enabled"],
             value=get_functions_df(),
-            datatype=["str", "str", "bool"],
-            row_count=(5, "dynamic"),
+            row_count=5,
             render=False,
             interactive=True
         ),
@@ -2365,8 +2364,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         'history_table': gr.Dataframe(
             headers=["Time", "Function", "Arguments", "Result", "Error"],
             value=get_initial_history_df(),
-            datatype=["str", "str", "str", "str", "str"],
-            row_count=(5, "dynamic"),
+            row_count=5,
             render=False,
             interactive=False
         ),
@@ -2412,7 +2410,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     local_model_form = {
         'search_query': gr.Textbox(label=get_text("Page.ModelManagement.AddLocalModelBlock.Textbox.search_query.label"), placeholder=get_text("Page.ModelManagement.AddLocalModelBlock.Textbox.search_query.placeholder"), render=False),
         'search_button': gr.Button(value=get_text("Page.ModelManagement.AddLocalModelBlock.Button.search.value"), render=False),
-        'search_results': gr.Dataframe(headers=get_text("Page.ModelManagement.Dataframe.search_results.headers"), datatype=["str", "number", "number"], interactive=False, render=False),
+        'search_results': gr.Dataframe(headers=get_text("Page.ModelManagement.Dataframe.search_results.headers"), interactive=False, render=False),
         'model_name': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.label",
                                      "Page.ModelManagement.AddLocalModelBlock.Textbox.model_name.placeholder"),
         'mlx_repo': create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.mlx_repo.label",
@@ -2471,7 +2469,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         headers=[get_text("Page.ModelManagement.Dataframe.model_list.headers")],
         value=update_model_management_models_list(),
         datatype="str",
-        row_count=(10, "dynamic"),
+        row_count=5,
         render=False,
         interactive=False
     )
@@ -2600,8 +2598,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     )
 
                 chatbot = gr.Chatbot(
-                    type="messages",
-                    show_copy_button=True,
+                    buttons=["copy", "copy_all"],
                     render=False,
                     latex_delimiters=[
                         {"left": "\\begin{equation}", "right": "\\end{equation}", "display": True},
@@ -2638,7 +2635,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 gr.ChatInterface(
                     multimodal=True,
                     chatbot=chatbot,
-                    type="messages",
                     fn=managed_chat_generator,
                     title=None,
                     autofocus=False,
@@ -2670,11 +2666,11 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     flagging_mode="never",
                     fn=managed_completion_generator,
                     inputs=[
-                               gr.Textbox(lines=10, show_copy_button=True, render=True,
+                               gr.Textbox(lines=10, buttons=["copy"], render=True,
                                           label=get_text("Page.Completion.Textbox.prompt.label")),
                            ] + list(completion_params.values()),
                     outputs=[
-                        gr.Textbox(lines=25, show_copy_button=True, render=True,
+                        gr.Textbox(lines=25, buttons=["copy"], render=True,
                                    label=get_text("Page.Completion.Textbox.output.label"))
                     ],
                     submit_btn=get_text("Page.Completion.Button.submit.value"),
