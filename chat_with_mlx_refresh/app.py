@@ -105,9 +105,6 @@ class FunctionManager:
                     return node.value
                 raise ValueError(f"Unsupported constant: {node.value!r}")
 
-            if hasattr(ast, "Num") and isinstance(node, ast.Constant):
-                return node.n
-
             if isinstance(node, ast.BinOp):
                 if type(node.op) not in ops:
                     raise ValueError(f"Unsupported operator: {ast.dump(node.op)}")
@@ -392,27 +389,34 @@ class FileManager:
         content = content.replace(boundary_end, '')
         return f"{boundary_start}\n{content}\n{boundary_end}"
 
-    def load_file(self, file_name: Path, raw_content_only: bool = False):
+    def _get_cached_content(self, file_name: Path, raw_content_only: bool) -> Optional[str]:
         file_key = file_name.name
-        if file_key in self.files:
-            cached_md5 = self.files[file_key]["md5"]
-            current_md5 = get_file_md5(file_name)
-            if cached_md5 == current_md5:
-                return self.files[file_key]["formatted_content"] if not raw_content_only else self.files[file_key]["content"]
+        if file_key not in self.files:
+            return None
+        
+        cached_md5 = self.files[file_key]["md5"]
+        current_md5 = get_file_md5(file_name)
+        if cached_md5 != current_md5:
+            return None
+        
+        return self.files[file_key]["content" if raw_content_only else "formatted_content"]
+
+    def load_file(self, file_name: Path, raw_content_only: bool = False):
+        cached_content = self._get_cached_content(file_name, raw_content_only)
+        if cached_content is not None:
+            return cached_content
+
+        loader_map = {
+            ".pdf": self.load_pdf,
+            ".docx": self.load_docx,
+            ".pptx": self.load_pptx,
+            **dict.fromkeys([".txt", ".csv", ".md"], self.load_txt_like),
+            **dict.fromkeys([".xlsx", ".xls"], self.load_excel),
+        }
         
         suffix = file_name.suffix.lower()
-        if suffix == ".pdf":
-            return self.load_pdf(file_name, raw_content_only)
-        elif suffix in [".txt", ".csv", ".md"]:
-            return self.load_txt_like(file_name, raw_content_only)
-        elif suffix == ".docx":
-            return self.load_docx(file_name, raw_content_only)
-        elif suffix == ".pptx":
-            return self.load_pptx(file_name, raw_content_only)
-        elif suffix in [".xlsx", ".xls"]:
-            return self.load_excel(file_name, raw_content_only)
-        else:
-            return None
+        loader = loader_map.get(suffix)
+        return loader(file_name, raw_content_only) if loader else None
 
     def load_pdf(self, file_name: Path, raw_content_only: bool = False):
         try:
@@ -669,12 +673,13 @@ rag_manager = RAGManager()
 
 def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]]:
     processed_message_parts = []
-    if "files" in message and message["files"]:
-        for file_path_str in message["files"]:
-            if file_path_str:
-                file_content = file_manager.load_file(Path(file_path_str))
-                if file_content:
-                    processed_message_parts.append(file_content)
+    
+    for file_path_str in message.get("files", []):
+        if not file_path_str:
+            continue
+        file_content = file_manager.load_file(Path(file_path_str))
+        if file_content:
+            processed_message_parts.append(file_content)
 
     text_content = message.get("text", "")
     if not isinstance(text_content, str):
@@ -772,6 +777,28 @@ def prepare_openai_message_content(text_input: Optional[str], file_paths: Option
     return content_parts
 
 
+def extract_image_paths_from_items(items: List[Dict]) -> List[str]:
+    IMAGE_EXTENSIONS = {".jpg", ".png", ".jpeg"}
+    image_paths = []
+    
+    for item in items:
+        content = item.get("content")
+        files = item.get("files", [])
+        
+        file_list = []
+        if isinstance(content, tuple):
+            file_list.extend(list(content))
+        if isinstance(files, list):
+            file_list.extend(files)
+        
+        for file_path_str in file_list:
+            path = Path(file_path_str)
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS:
+                image_paths.append(file_path_str)
+    
+    return image_paths
+
+
 def prepare_generic_model_inputs(current_message_dict: Dict, history_list: List[Dict], system_prompt: Optional[str], model_instance: Union[TextModel, VisionModel]) -> Tuple[str, List[Dict], List[str]]:
     effective_history = []
     if system_prompt and system_prompt.strip() != "":
@@ -787,24 +814,8 @@ def prepare_generic_model_inputs(current_message_dict: Dict, history_list: List[
 
     image_paths = []
     if isinstance(model_instance, VisionModel):
-        for hist_item in effective_history:
-            files_to_check = []
-            if isinstance(hist_item.get("content"), tuple):
-                files_to_check.extend(list(hist_item["content"]))
-            elif isinstance(hist_item.get("files"), list):
-                files_to_check.extend(hist_item["files"])
-
-            for file_path_str in files_to_check:
-                path = Path(file_path_str)
-                if path.is_file() and path.suffix.lower() in [".jpg", ".png", ".jpeg"]:
-                    image_paths.append(file_path_str)
-
-        if "files" in current_message_dict and current_message_dict["files"]:
-            for file_path_str in current_message_dict["files"]:
-                path = Path(file_path_str)
-                if path.is_file() and path.suffix.lower() in [".jpg", ".png", ".jpeg"]:
-                    image_paths.append(file_path_str)
-
+        image_paths = extract_image_paths_from_items(effective_history)
+        image_paths.extend(extract_image_paths_from_items([current_message_dict]))
         image_paths = list(set(image_paths))
 
     processed_message_text, processed_history_list = preprocess_file(current_message_dict, effective_history)
@@ -1151,6 +1162,47 @@ def generate_response_and_stream(
     return session
 
 
+def execute_function_calls(function_calls: List[Tuple[str, Dict]]) -> List[Dict]:
+    return [
+        {
+            "name": name,
+            "args": args,
+            "result": function_manager.execute_function(name, args)
+        }
+        for name, args in function_calls
+    ]
+
+
+def format_function_results(function_results: List[Dict], round_num: Optional[int] = None) -> ChatMessage:
+    content_parts = [
+        f"**Function Call {idx + 1}:** `{fr['name']}`\n"
+        f"**Arguments:** `{json.dumps(fr['args'])}`\n"
+        f"**Result:** {json.dumps(fr['result'])}"
+        for idx, fr in enumerate(function_results)
+    ]
+    
+    title_suffix = f" (Round {round_num})" if round_num else ""
+    title = f"Function Call{'s' if len(function_results) > 1 else ''}{title_suffix}"
+    
+    return ChatMessage(
+        role="assistant",
+        content="\n\n---\n\n".join(content_parts),
+        metadata={"title": title, "id": round_num or 1, "status": "done"}
+    )
+
+
+def build_assistant_response(session: StreamSession, function_results: List[Dict]) -> str:
+    function_names = ", ".join(fr["name"] for fr in function_results)
+    default_content = f"I'll call the following function(s): {function_names}."
+    
+    main_content = session.chat_message_accumulator.content or default_content
+    
+    if session.thinking_message and session.thinking_message.content:
+        return f"<think>{session.thinking_message.content}</think>\n{main_content}"
+    
+    return main_content
+
+
 def process_function_calling_loop(
     full_response: str,
     session: StreamSession,
@@ -1165,28 +1217,8 @@ def process_function_calling_loop(
     if not function_calls:
         return
 
-    function_results = []
-    for idx, (function_name, function_args) in enumerate(function_calls):
-        result = function_manager.execute_function(function_name, function_args)
-        function_results.append({
-            "name": function_name,
-            "args": function_args,
-            "result": result
-        })
-
-    function_content_parts = []
-    for idx, func_result in enumerate(function_results):
-        function_content_parts.append(
-            f"**Function Call {idx + 1}:** `{func_result['name']}`\n"
-            f"**Arguments:** `{json.dumps(func_result['args'])}`\n"
-            f"**Result:** {json.dumps(func_result['result'])}"
-        )
-    
-    function_message = ChatMessage(
-        role="assistant",
-        content="\n\n---\n\n".join(function_content_parts),
-        metadata={"title": f"Function Call{'s' if len(function_results) > 1 else ''}", "id": 1, "status": "done"}
-    )
+    function_results = execute_function_calls(function_calls)
+    function_message = format_function_results(function_results)
 
     current_messages = list(session.final_messages) + [function_message]
     if stream:
@@ -1195,16 +1227,7 @@ def process_function_calling_loop(
     all_succeeded = all("result" in func_result["result"] for func_result in function_results)
     
     if all_succeeded:
-        assistant_full_response = ""
-        if session.thinking_message and session.thinking_message.content:
-            function_names = ", ".join([fr["name"] for fr in function_results])
-            assistant_full_response = "<think>{}</think>\n{}".format(
-                session.thinking_message.content,
-                session.chat_message_accumulator.content or f"I'll call the following function(s): {function_names}."
-            )
-        else:
-            function_names = ", ".join([fr["name"] for fr in function_results])
-            assistant_full_response = session.chat_message_accumulator.content or f"I'll call the following function(s): {function_names}."
+        assistant_full_response = build_assistant_response(session, function_results)
 
         enhanced_history = history + [
             {"role": "assistant", "content": assistant_full_response}
@@ -1263,28 +1286,8 @@ def process_function_calling_loop(
             new_function_calls = function_manager.parse_function_call_from_response(follow_up_response)
             
             if new_function_calls:
-                function_results = []
-                for idx, (function_name, function_args) in enumerate(new_function_calls):
-                    result = function_manager.execute_function(function_name, function_args)
-                    function_results.append({
-                        "name": function_name,
-                        "args": function_args,
-                        "result": result
-                    })
-
-                function_content_parts = []
-                for idx, func_result in enumerate(function_results):
-                    function_content_parts.append(
-                        f"**Function Call {idx + 1}:** `{func_result['name']}`\n"
-                        f"**Arguments:** `{json.dumps(func_result['args'])}`\n"
-                        f"**Result:** {json.dumps(func_result['result'])}"
-                    )
-                
-                new_function_message = ChatMessage(
-                    role="assistant",
-                    content="\n\n---\n\n".join(function_content_parts),
-                    metadata={"title": f"Function Call{'s' if len(function_results) > 1 else ''} (Round {current_iteration})", "id": 2 + current_iteration, "status": "done"}
-                )
+                function_results = execute_function_calls(new_function_calls)
+                new_function_message = format_function_results(function_results, round_num=current_iteration)
 
                 current_base_messages = follow_up_session.base_messages + follow_up_session.final_messages + [new_function_message]
                 if stream:
@@ -1295,16 +1298,7 @@ def process_function_calling_loop(
                 if not all_succeeded:
                     break
                 
-                follow_up_full_response = ""
-                if follow_up_session.thinking_message and follow_up_session.thinking_message.content:
-                    function_names = ", ".join([fr["name"] for fr in function_results])
-                    follow_up_full_response = "<think>{}</think>\n{}".format(
-                        follow_up_session.thinking_message.content,
-                        follow_up_session.chat_message_accumulator.content or f"I'll call: {function_names}."
-                    )
-                else:
-                    function_names = ", ".join([fr["name"] for fr in function_results])
-                    follow_up_full_response = follow_up_session.chat_message_accumulator.content or f"I'll call: {function_names}."
+                follow_up_full_response = build_assistant_response(follow_up_session, function_results)
 
                 enhanced_history.append({"role": "assistant", "content": follow_up_full_response})
                 
@@ -1668,25 +1662,24 @@ def update_slider_config(slider_new_min: Union[int, float], slider_new_max: Unio
 
 
 def update_model_max_length(slider_value: Union[int, float]):
+    DEFAULT_MAX_LENGTH = 32768
+    
     try:
         model = get_loaded_model()
-        if model is not None:
-            try:
-                model_max_length = 32768
-                if isinstance(model, TextModel) or isinstance(model, VisionModel):
-                    model_max_length = model.max_position_embeddings
-                if model_max_length is None or model_max_length <= 0:
-                    model_max_length = 32768
-            except Exception as e:
-                model_max_length = 32768
-                logger.error("Error while updating model max length.")
-            return update_slider_config(1, model_max_length, slider_value)
-        else:
-            return gr.update()
     except RuntimeError:
         return gr.update()
+    
+    try:
+        max_length = DEFAULT_MAX_LENGTH
+        if isinstance(model, (TextModel, VisionModel)):
+            max_length = model.max_position_embeddings or DEFAULT_MAX_LENGTH
+            if max_length <= 0:
+                max_length = DEFAULT_MAX_LENGTH
+        
+        return update_slider_config(1, max_length, slider_value)
     except Exception as e:
-        raise gr.Error(str(e))
+        logger.error(f"Error updating model max length: {e}")
+        return update_slider_config(1, DEFAULT_MAX_LENGTH, slider_value)
 
 
 def bytes_to_gigabytes(value):
@@ -1885,21 +1878,13 @@ def clear_rag_index() -> Tuple[str, str]:
 
 
 def toggle_rag_enabled(enabled: bool) -> str:
-    if enabled:
-        rag_manager.enable()
-        return "RAG enabled."
-    else:
-        rag_manager.disable()
-        return "RAG disabled."
+    rag_manager.enable() if enabled else rag_manager.disable()
+    return f"RAG {'enabled' if enabled else 'disabled'}."
 
 
 def toggle_function_calling_enabled(enabled: bool) -> str:
-    if enabled:
-        function_manager.enable()
-        return "Function calling enabled."
-    else:
-        function_manager.disable()
-        return "Function calling disabled."
+    function_manager.enable() if enabled else function_manager.disable()
+    return f"Function calling {'enabled' if enabled else 'disabled'}."
 
 
 def update_rag_parameters(chunk_size: int, chunk_overlap: int, similarity_threshold: float) -> str:
