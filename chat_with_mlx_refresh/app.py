@@ -1,7 +1,7 @@
 import argparse
 import atexit
 import base64
-import copy
+import functools
 import hashlib
 import logging
 import threading
@@ -366,12 +366,19 @@ def get_loaded_model() -> Union[BaseLocalModel]:
     return model
 
 
-def get_file_md5(file_name: Path) -> str:
+@functools.lru_cache(maxsize=128)
+def _get_file_md5_cached(file_path: str, mtime: float) -> str:
     md5 = hashlib.md5()
-    with open(file_name, "rb") as f:
+    with open(file_path, 'rb') as f:
         for chunk in iter(lambda: f.read(4096), b""):
             md5.update(chunk)
     return md5.hexdigest()
+
+
+def get_file_md5(file_name: Path) -> str:
+    file_path = str(file_name)
+    mtime = file_name.stat().st_mtime
+    return _get_file_md5_cached(file_path, mtime)
 
 
 class FileManager:
@@ -386,9 +393,13 @@ class FileManager:
         return f"{boundary_start}\n{content}\n{boundary_end}"
 
     def load_file(self, file_name: Path, raw_content_only: bool = False):
-        if file_name.name in self.files:
-            if self.files[file_name.name]["md5"] == get_file_md5(file_name):
-                return self.files[file_name.name]["formatted_content"] if not raw_content_only else self.files[file_name.name]["content"]
+        file_key = file_name.name
+        if file_key in self.files:
+            cached_md5 = self.files[file_key]["md5"]
+            current_md5 = get_file_md5(file_name)
+            if cached_md5 == current_md5:
+                return self.files[file_key]["formatted_content"] if not raw_content_only else self.files[file_key]["content"]
+        
         suffix = file_name.suffix.lower()
         if suffix == ".pdf":
             return self.load_pdf(file_name, raw_content_only)
@@ -564,7 +575,14 @@ class RAGManager:
         if not chunks:
             return False, "No content to index in document '{}'.".format(file_path.name)
 
-        embeddings = self.embedding_model.encode(chunks, show_progress_bar=True)
+        if self.embedding_model is None:
+            logger.info("Lazy loading embedding model for RAG...")
+            self.embedding_model = SentenceTransformer(self.model_name)
+        embeddings = self.embedding_model.encode(
+            chunks, 
+            show_progress_bar=True,
+            batch_size=32
+        )
 
         ids = [f"{file_path.name}_{i}" for i in range(len(chunks))]
         metadata = [{"source": file_path.name, "chunk_id": i} for i in range(len(chunks))]
@@ -582,9 +600,13 @@ class RAGManager:
         if self.collection.count() == 0:
             return ""
 
+        if self.embedding_model is None:
+            logger.info("Lazy loading embedding model for RAG...")
+            self.embedding_model = SentenceTransformer(self.model_name)
+
         results_count = n_results if n_results is not None else self.n_results
 
-        query_embeddings = self.embedding_model.encode([query])
+        query_embeddings = self.embedding_model.encode([query], show_progress_bar=False)
         results = self.collection.query(
             query_embeddings=query_embeddings,
             n_results=min(results_count, self.collection.count())
@@ -665,7 +687,7 @@ def preprocess_file(message: Dict, history: List[Dict]) -> Tuple[str, List[Dict]
     i = 0
     while i < len(history):
         current_hist_item_original = history[i]
-        current_processed_item = copy.deepcopy(current_hist_item_original)
+        current_processed_item = current_hist_item_original.copy()
 
         current_content = current_hist_item_original.get("content")
 
