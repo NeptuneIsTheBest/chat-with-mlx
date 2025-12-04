@@ -3,11 +3,15 @@ import atexit
 import base64
 import functools
 import hashlib
+import json
 import logging
+import re
 import threading
-from dataclasses import dataclass
+import time
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Tuple, Optional, Union
+from typing import Any, Callable, Tuple, Union
+from typing import Dict, List, Optional, Iterable, Iterator
 
 import chromadb
 import gradio as gr
@@ -821,13 +825,6 @@ def prepare_generic_model_inputs(current_message_dict: Dict, history_list: List[
     processed_message_text, processed_history_list = preprocess_file(current_message_dict, effective_history)
 
     return processed_message_text, processed_history_list, image_paths
-
-
-from typing import Dict, List, Optional, Iterable, Iterator
-from dataclasses import dataclass, field
-import time
-import json
-import re
 
 CHATML_CONTROL_TOKENS = [
     '<|im_start|>', '<|im_end|>',
@@ -2635,6 +2632,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                 gr.ChatInterface(
                     multimodal=True,
                     chatbot=chatbot,
+                    editable=True,
                     fn=managed_chat_generator,
                     title=None,
                     autofocus=False,
