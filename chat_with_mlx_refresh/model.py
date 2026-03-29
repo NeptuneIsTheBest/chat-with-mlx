@@ -550,7 +550,7 @@ class ModelManager:
         return total_usage
 
     def get_device_info(self) -> Dict[str, Union[str, int]]:
-        return mlx.core.metal.device_info()
+        return mlx.core.device_info()
 
     def get_memory_usage_level(self) -> MemoryUsageLevel:
         return self.memory_usage_level

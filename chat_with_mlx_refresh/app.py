@@ -10,7 +10,7 @@ import threading
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Tuple, Union
+from typing import Any, Tuple, Union
 from typing import Dict, List, Optional, Iterable, Iterator
 
 import chromadb
@@ -29,335 +29,6 @@ logger.setLevel(logging.INFO)
 
 model_manager = ModelManager()
 generation_stop_event = threading.Event()
-
-
-@dataclass
-class FunctionDefinition:
-    name: str
-    description: str
-    parameters: Dict[str, Any]
-    implementation: Optional[Callable] = None
-    enabled: bool = True
-
-    def to_openai_format(self) -> Dict[str, Any]:
-        return {
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": self.description,
-                "parameters": self.parameters
-            }
-        }
-
-    def to_dict(self) -> Dict[str, Any]:
-        return {
-            "name": self.name,
-            "description": self.description,
-            "parameters": self.parameters,
-            "enabled": self.enabled
-        }
-
-
-class FunctionManager:
-    def __init__(self):
-        self.functions: Dict[str, FunctionDefinition] = {}
-        self.execution_history: List[Dict[str, Any]] = []
-        self.enabled = False
-        self.execution_mode = "execute"
-        self._initialize_builtin_functions()
-
-    def _initialize_builtin_functions(self):
-        calculator_function = FunctionDefinition(
-            name="calculate",
-            description="Calculate a mathematical expression",
-            parameters={
-                "type": "object",
-                "properties": {
-                    "expression": {
-                        "type": "string",
-                        "description": "The mathematical expression to evaluate"
-                    }
-                },
-                "required": ["expression"]
-            },
-            implementation=self._calculate
-        )
-        self.add_function(calculator_function)
-
-    @staticmethod
-    def _calculate(expression: str) -> float:
-        import ast
-        import operator as op
-
-        ops = {
-            ast.Add: op.add,
-            ast.Sub: op.sub,
-            ast.Mult: op.mul,
-            ast.Div: op.truediv,
-            ast.Mod: op.mod,
-            ast.Pow: op.pow,
-            ast.UAdd: lambda x: +x,
-            ast.USub: lambda x: -x,
-        }
-
-        def eval_node(node):
-            if isinstance(node, ast.Expression):
-                return eval_node(node.body)
-
-            if isinstance(node, ast.Constant):
-                if isinstance(node.value, (int, float)):
-                    return node.value
-                raise ValueError(f"Unsupported constant: {node.value!r}")
-
-            if isinstance(node, ast.BinOp):
-                if type(node.op) not in ops:
-                    raise ValueError(f"Unsupported operator: {ast.dump(node.op)}")
-                left = eval_node(node.left)
-                right = eval_node(node.right)
-                return ops[type(node.op)](left, right)
-
-            if isinstance(node, ast.UnaryOp):
-                if type(node.op) not in ops:
-                    raise ValueError(f"Unsupported unary operator: {ast.dump(node.op)}")
-                operand = eval_node(node.operand)
-                return ops[type(node.op)](operand)
-
-            forbidden = (
-                ast.Call, ast.Name, ast.Attribute, ast.Subscript, ast.List, ast.Tuple,
-                ast.Dict, ast.Set, ast.ListComp, ast.DictComp, ast.SetComp, ast.GeneratorExp,
-                ast.BoolOp, ast.Compare, ast.IfExp, ast.Lambda, ast.Await, ast.Yield, ast.YieldFrom
-            )
-            if isinstance(node, forbidden):
-                raise ValueError(f"Unsupported expression: {ast.dump(node)}")
-
-            raise ValueError(f"Unsupported expression: {ast.dump(node)}")
-
-        try:
-            tree = ast.parse(expression, mode="eval")
-            result = eval_node(tree)
-            return float(result)
-        except Exception as e:
-            raise ValueError(f"Invalid expression: {e}") from e
-
-    def set_execution_mode(self, mode: str):
-        mode = (mode or "").lower().strip()
-        if mode not in ("execute", "simulate"):
-            raise ValueError("Invalid execution mode. Use 'execute' or 'simulate'.")
-        self.execution_mode = mode
-
-    def get_execution_mode(self) -> str:
-        return self.execution_mode
-
-    def get_function_names(self) -> List[str]:
-        return sorted(self.functions.keys())
-
-    def toggle_all(self, enabled: bool) -> int:
-        changed = 0
-        for func in self.functions.values():
-            if func.enabled != enabled:
-                func.enabled = enabled
-                changed += 1
-        return changed
-
-    def export_custom_functions(self) -> List[Dict[str, Any]]:
-        return [f.to_dict() for f in self.functions.values() if f.implementation is None]
-
-    def import_functions(self, functions_payload: Union[str, List[Dict[str, Any]], Dict[str, Any]]) -> Tuple[bool, str]:
-        try:
-            if isinstance(functions_payload, str):
-                data = json.loads(functions_payload)
-            else:
-                data = functions_payload
-
-            if isinstance(data, dict) and "functions" in data:
-                items = data["functions"]
-            elif isinstance(data, list):
-                items = data
-            else:
-                return False, "Invalid import format. Expect list or {'functions': [...]}"
-
-            added, skipped = 0, 0
-            for item in items:
-                name = item.get("name")
-                desc = item.get("description", "")
-                params = item.get("parameters")
-                if not name or not params:
-                    skipped += 1
-                    continue
-                ok, _ = self.add_custom_function(name, desc, json.dumps(params, ensure_ascii=False))
-                if ok:
-                    added += 1
-                else:
-                    skipped += 1
-
-            return True, f"Import done. Added: {added}, Skipped: {skipped}"
-        except Exception as e:
-            return False, f"Import error: {e}"
-
-    def get_execution_history_rows(self, limit: int = 50) -> List[List[str]]:
-        rows = []
-        for rec in reversed(self.execution_history[-limit:]):
-            ts = time.strftime("%Y-%m-%d %H:%M:%S", time.localtime(rec.get("timestamp", time.time())))
-            func = rec.get("function", "")
-            args = json.dumps(rec.get("arguments", {}), ensure_ascii=False)
-            if "result" in rec:
-                res = json.dumps(rec.get("result"), ensure_ascii=False)
-                err = ""
-            else:
-                res = ""
-                err = str(rec.get("error", ""))
-            rows.append([ts, func, args, res, err])
-        return rows
-
-    def add_function(self, function: FunctionDefinition) -> bool:
-        if function.name in self.functions:
-            return False
-        self.functions[function.name] = function
-        return True
-
-    def add_custom_function(self, name: str, description: str, parameters_json: str) -> Tuple[bool, str]:
-        try:
-            parameters = json.loads(parameters_json)
-            function = FunctionDefinition(
-                name=name,
-                description=description,
-                parameters=parameters,
-                implementation=None
-            )
-            if self.add_function(function):
-                return True, f"Function '{name}' added successfully"
-            else:
-                return False, f"Function '{name}' already exists"
-        except json.JSONDecodeError as e:
-            return False, f"Invalid JSON parameters: {e}"
-        except Exception as e:
-            return False, f"Error adding function: {e}"
-
-    def remove_function(self, name: str) -> bool:
-        if name in self.functions:
-            del self.functions[name]
-            return True
-        return False
-
-    def get_function(self, name: str) -> Optional[FunctionDefinition]:
-        return self.functions.get(name)
-
-    def get_enabled_functions(self) -> List[FunctionDefinition]:
-        return [f for f in self.functions.values() if f.enabled]
-
-    def execute_function(self, name: str, arguments: Union[str, Dict[str, Any]]) -> Dict[str, Any]:
-        function = self.get_function(name)
-        if not function:
-            return {"error": f"Function {name} not found"}
-
-        if not function.enabled:
-            return {"error": f"Function {name} is disabled"}
-
-        if isinstance(arguments, str):
-            try:
-                arguments = json.loads(arguments) if arguments else {}
-            except json.JSONDecodeError:
-                return {"error": f"Invalid JSON arguments: {arguments}"}
-
-        try:
-            if self.execution_mode == "simulate":
-                result = f"[Simulated] Executed {name} with arguments: {json.dumps(arguments, ensure_ascii=False)}"
-            else:
-                if function.implementation:
-                    result = function.implementation(**arguments)
-                else:
-                    result = f"[Simulated] Executed {name} with arguments: {json.dumps(arguments, ensure_ascii=False)}"
-
-            execution_record = {
-                "function": name,
-                "arguments": arguments,
-                "result": result,
-                "timestamp": time.time()
-            }
-            self.execution_history.append(execution_record)
-            return {"result": result}
-        except Exception as e:
-            execution_record = {
-                "function": name,
-                "arguments": arguments,
-                "error": str(e),
-                "timestamp": time.time()
-            }
-            self.execution_history.append(execution_record)
-            return {"error": str(e)}
-
-    def toggle_function(self, name: str, enabled: bool) -> bool:
-        if name in self.functions:
-            self.functions[name].enabled = enabled
-            return True
-        return False
-
-    def get_openai_tools(self) -> List[Dict[str, Any]]:
-        return [f.to_openai_format() for f in self.get_enabled_functions()]
-
-    def get_functions_list(self) -> List[List[Union[str, bool]]]:
-        return [[f.name, f.description, f.enabled] for f in self.functions.values()]
-
-    def clear_history(self):
-        self.execution_history.clear()
-
-    def enable(self):
-        self.enabled = True
-
-    def disable(self):
-        self.enabled = False
-
-    def is_enabled(self) -> bool:
-        return self.enabled
-
-    def format_function_call_for_local_model(self, message: str) -> str:
-        if not self.enabled or not self.get_enabled_functions():
-            return message
-
-        functions_str = "Available functions:\n"
-        for func in self.get_enabled_functions():
-            functions_str += f"- {func.name}: {func.description}\n"
-            functions_str += f"  Parameters: {json.dumps(func.parameters, indent=2)}\n"
-
-        return f"""{functions_str}
-
-You can call one or multiple functions as needed. Use the format:
-<function_call>
-{{"name": "function_name", "arguments": {{"param": "value"}}}}
-</function_call>
-
-For multiple function calls, use multiple <function_call> blocks:
-<function_call>
-{{"name": "function1", "arguments": {{"param": "value1"}}}}
-</function_call>
-<function_call>
-{{"name": "function2", "arguments": {{"param": "value2"}}}}
-</function_call>
-
-User message: {message}"""
-
-    def parse_function_call_from_response(self, response: str) -> Optional[List[Tuple[str, Dict[str, Any]]]]:
-        """Parse function calls from response. Returns a list of (function_name, arguments) tuples."""
-        pattern = r'<function_call>\s*(\{.*?\})\s*</function_call>'
-        matches = re.findall(pattern, response, re.DOTALL)
-
-        function_calls = []
-        if matches:
-            for match in matches:
-                try:
-                    function_data = json.loads(match)
-                    function_name = function_data.get("name")
-                    function_args = function_data.get("arguments", {})
-                    if function_name:
-                        function_calls.append((function_name, function_args))
-                except json.JSONDecodeError:
-                    logger.warning(f"Failed to parse function call: {match}")
-                    continue
-
-        return function_calls if function_calls else None
-
-
-function_manager = FunctionManager()
 
 
 def get_loaded_model() -> Union[BaseLocalModel]:
@@ -837,9 +508,7 @@ DEFAULT_PARTIAL_PREFIXES = [
     "<", "<t", "<th", "<thi", "<thin", "<think",
     "</", "</t", "</th", "</thi", "</thin", "</think",
     "<a", "<an", "<ans", "<answ", "<answe", "<answer",
-    "</a", "</an", "</ans", "</answ", "</answe", "</answer",
-    "<f", "<fu", "<fun", "<func", "<funct", "<functi", "<functio", "<function",
-    "<function_", "<function_c", "<function_ca", "<function_cal", "<function_call"
+    "</a", "</an", "</ans", "</answ", "</answe", "</answer"
 ]
 
 def apply_rag_if_needed(message: Dict, rag_enabled: bool, rag_n_results: int) -> Dict:
@@ -1159,159 +828,6 @@ def generate_response_and_stream(
     return session
 
 
-def execute_function_calls(function_calls: List[Tuple[str, Dict]]) -> List[Dict]:
-    return [
-        {
-            "name": name,
-            "args": args,
-            "result": function_manager.execute_function(name, args)
-        }
-        for name, args in function_calls
-    ]
-
-
-def format_function_results(function_results: List[Dict], round_num: Optional[int] = None) -> ChatMessage:
-    content_parts = [
-        f"**Function Call {idx + 1}:** `{fr['name']}`\n"
-        f"**Arguments:** `{json.dumps(fr['args'])}`\n"
-        f"**Result:** {json.dumps(fr['result'])}"
-        for idx, fr in enumerate(function_results)
-    ]
-    
-    title_suffix = f" (Round {round_num})" if round_num else ""
-    title = f"Function Call{'s' if len(function_results) > 1 else ''}{title_suffix}"
-    
-    return ChatMessage(
-        role="assistant",
-        content="\n\n---\n\n".join(content_parts),
-        metadata={"title": title, "id": round_num or 1, "status": "done"}
-    )
-
-
-def build_assistant_response(session: StreamSession, function_results: List[Dict]) -> str:
-    function_names = ", ".join(fr["name"] for fr in function_results)
-    default_content = f"I'll call the following function(s): {function_names}."
-    
-    main_content = session.chat_message_accumulator.content or default_content
-    
-    if session.thinking_message and session.thinking_message.content:
-        return f"<think>{session.thinking_message.content}</think>\n{main_content}"
-    
-    return main_content
-
-
-def process_function_calling_loop(
-    full_response: str,
-    session: StreamSession,
-    model: Union[TextModel, VisionModel],
-    history: List[Dict],
-    sampling_params: Dict[str, Any],
-    stream: bool,
-    max_tokens: int,
-    image_paths: List[str]
-) -> Iterator[List[Dict]]:
-    function_calls = function_manager.parse_function_call_from_response(full_response)
-    if not function_calls:
-        return
-
-    function_results = execute_function_calls(function_calls)
-    function_message = format_function_results(function_results)
-
-    current_messages = list(session.final_messages) + [function_message]
-    if stream:
-        yield current_messages
-
-    all_succeeded = all("result" in func_result["result"] for func_result in function_results)
-    
-    if all_succeeded:
-        assistant_full_response = build_assistant_response(session, function_results)
-
-        enhanced_history = history + [
-            {"role": "assistant", "content": assistant_full_response}
-        ]
-        
-        for func_result in function_results:
-            enhanced_history.append({
-                "role": "tool",
-                "content": json.dumps(func_result["result"]["result"]),
-                "name": func_result["name"]
-            })
-
-        max_iterations = 5
-        current_iteration = 0
-        current_base_messages = current_messages
-        
-        while current_iteration < max_iterations:
-            current_iteration += 1
-            
-            results_summary = []
-            for func_result in function_results:
-                results_summary.append(
-                    f"Function '{func_result['name']}' returned: {json.dumps(func_result['result']['result'])}"
-                )
-            
-            follow_up_prompt = (
-                f"Based on the function results:\n"
-                f"{chr(10).join(results_summary)}\n\n"
-                f"Please provide a helpful response to the user's original question. "
-                f"If you need to call more functions, you can do so."
-            )
-
-            follow_up_args = {
-                "message": follow_up_prompt,
-                "history": enhanced_history,
-                "stream": stream,
-                "max_tokens": max_tokens,
-                **sampling_params
-            }
-            if isinstance(model, VisionModel) and image_paths:
-                follow_up_args["images"] = image_paths
-
-            follow_up_session = yield from generate_response_and_stream(
-                model=model,
-                response_args=follow_up_args,
-                eos_token=session.eos_token,
-                stream=stream,
-                generation_stop_event=session.generation_stop_event,
-                thinking_title=f"Follow-up Thinking (Round {current_iteration})",
-                inline_thought_title=f"Follow-up Thought {current_iteration}",
-                thinking_id=2 + current_iteration,
-                base_messages=current_base_messages
-            )
-
-            follow_up_response = follow_up_session.full_response
-            new_function_calls = function_manager.parse_function_call_from_response(follow_up_response)
-            
-            if new_function_calls:
-                function_results = execute_function_calls(new_function_calls)
-                new_function_message = format_function_results(function_results, round_num=current_iteration)
-
-                current_base_messages = follow_up_session.base_messages + follow_up_session.final_messages + [new_function_message]
-                if stream:
-                    yield current_base_messages
-
-                all_succeeded = all("result" in func_result["result"] for func_result in function_results)
-                
-                if not all_succeeded:
-                    break
-                
-                follow_up_full_response = build_assistant_response(follow_up_session, function_results)
-
-                enhanced_history.append({"role": "assistant", "content": follow_up_full_response})
-                
-                for func_result in function_results:
-                    enhanced_history.append({
-                        "role": "tool",
-                        "content": json.dumps(func_result["result"]["result"]),
-                        "name": func_result["name"]
-                    })
-            else:
-                if not stream:
-                    all_messages = follow_up_session.base_messages + follow_up_session.final_messages
-                    yield all_messages
-                break
-
-
 def handle_chat(message: Dict,
                 history: List[Dict],
                 system_prompt: str = None,
@@ -1323,7 +839,6 @@ def handle_chat(message: Dict,
                 repetition_penalty: float = 1.0,
                 rag_enabled: bool = False,
                 rag_n_results: int = 5,
-                function_calling_enabled: bool = False,
                 stream: bool = True):
     try:
         message = apply_rag_if_needed(message, rag_enabled, rag_n_results)
@@ -1334,9 +849,6 @@ def handle_chat(message: Dict,
         processed_message_text, processed_history_list, image_paths = prepare_generic_model_inputs(
             message, history, system_prompt, model
         )
-
-        if function_calling_enabled and function_manager.is_enabled():
-            processed_message_text = function_manager.format_function_call_for_local_model(processed_message_text)
 
         sampling = normalize_sampling_params(temperature, top_k, top_p, min_p, repetition_penalty)
 
@@ -1351,7 +863,7 @@ def handle_chat(message: Dict,
             response_args["images"] = image_paths
         eos_token = get_eos_token_from_model(model)
 
-        session = yield from generate_response_and_stream(
+        yield from generate_response_and_stream(
             model=model,
             response_args=response_args,
             eos_token=eos_token,
@@ -1362,21 +874,6 @@ def handle_chat(message: Dict,
             thinking_id=0,
             base_messages=[]
         )
-
-        final_messages = session.final_messages
-        full_response = session.full_response
-
-        if function_calling_enabled and function_manager.is_enabled():
-            yield from process_function_calling_loop(
-                full_response=full_response,
-                session=session,
-                model=model,
-                history=processed_history_list,
-                sampling_params=sampling,
-                stream=stream,
-                max_tokens=max_tokens,
-                image_paths=image_paths
-            )
 
     except Exception as e:
         logger.exception("Error in handle_chat:")
@@ -1395,7 +892,6 @@ def managed_chat_generator(
         repetition_penalty: float = 1.0,
         rag_enabled: bool = False,
         rag_n_results: int = 5,
-        function_calling_enabled: bool = False,
         stream: bool = True):
     g = handle_chat(
         message=message,
@@ -1409,7 +905,6 @@ def managed_chat_generator(
         repetition_penalty=repetition_penalty,
         rag_enabled=rag_enabled,
         rag_n_results=rag_n_results,
-        function_calling_enabled=function_calling_enabled,
         stream=stream,
     )
 
@@ -1565,9 +1060,10 @@ def search_huggingface_models(query: str) -> DataFrame:
 
     api = HfApi()
     try:
-        models = api.list_models(search=query, filter="mlx", sort="likes", direction=-1, limit=50)
+        models = api.list_models(search=query, filter="mlx", sort="likes", limit=100)
+        sorted_models = sorted(models, key=lambda m: m.likes, reverse=True)[:50]
         data = []
-        for model in models:
+        for model in sorted_models:
             data.append([model.modelId, model.likes, model.downloads])
         return DataFrame(data, columns=get_text("Page.ModelManagement.Dataframe.search_results.headers"))
     except Exception as e:
@@ -1706,147 +1202,6 @@ def get_rag_status() -> str:
     return rag_manager.get_status()[1]
 
 
-def get_function_calling_enabled_status() -> bool:
-    return function_manager.is_enabled()
-
-
-def get_function_status() -> str:
-    if not function_manager.functions:
-        return "No functions configured."
-    enabled_count = len(function_manager.get_enabled_functions())
-    total_count = len(function_manager.functions)
-    mode = function_manager.get_execution_mode()
-    mode_label = "Simulate" if mode == "simulate" else "Execute"
-    return f"{enabled_count}/{total_count} functions enabled. Mode: {mode_label}."
-
-
-def get_functions_df() -> DataFrame:
-    return DataFrame(function_manager.get_functions_list(), columns=["Name", "Description", "Enabled"])
-
-
-def build_sample_args_from_schema(schema: Dict[str, Any]) -> Dict[str, Any]:
-    props = (schema or {}).get("properties", {})
-    required = (schema or {}).get("required", [])
-
-    def sample_for(t: str, node: Dict[str, Any]) -> Any:
-        if t == "string":
-            return ""
-        if t in ("integer", "number"):
-            return 0
-        if t == "boolean":
-            return False
-        if t == "array":
-            item = (node or {}).get("items", {})
-            itype = item.get("type", "string")
-            return [sample_for(etype, item)] if (etype := itype) else []
-        if t == "object":
-            return {}
-        return None
-
-    out = {}
-    for k in required:
-        node = props.get(k, {})
-        t = node.get("type", "string")
-        out[k] = sample_for(t, node)
-    return out
-
-
-def get_function_schema_and_sample(name: str) -> Tuple[str, str]:
-    func = function_manager.get_function(name)
-    if not func:
-        return "", "{}"
-    schema_pretty = json.dumps(func.parameters or {}, indent=2, ensure_ascii=False)
-    sample = build_sample_args_from_schema(func.parameters or {})
-    return schema_pretty, json.dumps(sample, indent=2, ensure_ascii=False)
-
-
-def execute_function_test(name: str, args_json: str) -> Tuple[str, str, DataFrame]:
-    result = function_manager.execute_function(name, args_json)
-    if "result" in result:
-        status = f"Executed '{name}' successfully."
-        pretty = json.dumps(result["result"], indent=2, ensure_ascii=False)
-    else:
-        status = f"Error executing '{name}': {result.get('error')}"
-        pretty = json.dumps(result, indent=2, ensure_ascii=False)
-    hist_df = DataFrame(
-        function_manager.get_execution_history_rows(limit=50),
-        columns=["Time", "Function", "Arguments", "Result", "Error"]
-    )
-    return pretty, status, hist_df
-
-
-def clear_function_history() -> Tuple[DataFrame, str]:
-    function_manager.clear_history()
-    hist_df = DataFrame(
-        function_manager.get_execution_history_rows(limit=50),
-        columns=["Time", "Function", "Arguments", "Result", "Error"]
-    )
-    return hist_df, "Function execution history cleared."
-
-
-def apply_function_list_enabled_from_df(df: Union[DataFrame, List[List[Any]]]) -> Tuple[str, str, DataFrame]:
-    try:
-        rows = df.values.tolist() if isinstance(df, DataFrame) else df
-        changed = 0
-        for name, _, enabled in rows:
-            if isinstance(enabled, str):
-                enabled_bool = enabled.strip().lower() in ("true", "1", "✓", "yes")
-            else:
-                enabled_bool = bool(enabled)
-            if function_manager.get_function(name):
-                changed += 1 if function_manager.toggle_function(name, enabled_bool) else 0
-        msg = f"Synchronized {len(rows)} functions."
-    except Exception as e:
-        msg = f"Sync error: {e}"
-
-    return msg, get_function_status(), get_functions_df()
-
-
-def enable_all_functions() -> Tuple[str, DataFrame, str]:
-    changed = function_manager.toggle_all(True)
-    return f"Enabled {changed} function(s).", get_functions_df(), get_function_status()
-
-
-def disable_all_functions() -> Tuple[str, DataFrame, str]:
-    changed = function_manager.toggle_all(False)
-    return f"Disabled {changed} function(s).", get_functions_df(), get_function_status()
-
-
-def set_function_execution_mode(mode_label: str) -> str:
-    mode = "simulate" if (mode_label or "").lower().startswith("sim") else "execute"
-    function_manager.set_execution_mode(mode)
-    return get_function_status()
-
-
-def get_openai_tools_preview() -> str:
-    return json.dumps(function_manager.get_openai_tools(), indent=2, ensure_ascii=False)
-
-
-def export_custom_functions_json() -> str:
-    return json.dumps(function_manager.export_custom_functions(), indent=2, ensure_ascii=False)
-
-
-def import_custom_functions_from_json(json_text: str) -> Tuple[str, DataFrame, str, gr.update]:
-    ok, message = function_manager.import_functions(json_text or "[]")
-    return (
-        message,
-        get_functions_df(),
-        get_function_status(),
-        gr.update(choices=function_manager.get_function_names())
-    )
-
-
-def update_test_function_choices() -> gr.update:
-    return gr.update(choices=function_manager.get_function_names())
-
-
-def get_initial_history_df() -> DataFrame:
-    return DataFrame(
-        function_manager.get_execution_history_rows(limit=50),
-        columns=["Time", "Function", "Arguments", "Result", "Error"]
-    )
-
-
 def upload_and_index_file(files) -> Tuple[str, str]:
     if not files:
         return "No files selected.", get_rag_status()
@@ -1879,11 +1234,6 @@ def toggle_rag_enabled(enabled: bool) -> str:
     return f"RAG {'enabled' if enabled else 'disabled'}."
 
 
-def toggle_function_calling_enabled(enabled: bool) -> str:
-    function_manager.enable() if enabled else function_manager.disable()
-    return f"Function calling {'enabled' if enabled else 'disabled'}."
-
-
 def update_rag_parameters(chunk_size: int, chunk_overlap: int, similarity_threshold: float) -> str:
     try:
         updated = rag_manager.update_parameters(
@@ -1908,28 +1258,6 @@ def get_rag_parameters() -> Tuple[int, int, int, float]:
         params["n_results"],
         params["similarity_threshold"]
     )
-
-
-def add_custom_function(name: str, description: str, parameters_json: str) -> Tuple[str, DataFrame]:
-    success, message = function_manager.add_custom_function(name, description, parameters_json)
-    return message, get_functions_df()
-
-
-def toggle_function(name: str, enabled: bool) -> Tuple[str, DataFrame]:
-    if function_manager.toggle_function(name, enabled):
-        status = "enabled" if enabled else "disabled"
-        message = f"Function '{name}' {status}."
-    else:
-        message = f"Function '{name}' not found."
-    return message, get_functions_df()
-
-
-def remove_function(name: str) -> Tuple[str, DataFrame]:
-    if function_manager.remove_function(name):
-        message = f"Function '{name}' removed."
-    else:
-        message = f"Function '{name}' not found."
-    return message, get_functions_df()
 
 
 def enhance_message_with_rag(message_text: str, rag_enabled: bool, n_results: int = 5) -> str:
@@ -2248,159 +1576,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         'params_status': create_textbox("Page.Chat.Accordion.RAGSetting.Textbox.params_status.label", interactive=False, render=False)
     }
 
-    function_form = {
-        'function_calling_enabled': gr.Checkbox(
-            label="Enable Function Calling",
-            value=get_function_calling_enabled_status,
-            interactive=True,
-            render=False
-        ),
-        'execution_mode': gr.Radio(
-            label="Execution Mode",
-            choices=["Execute", "Simulate"],
-            value=lambda: "Simulate" if function_manager.get_execution_mode() == "simulate" else "Execute",
-            interactive=True,
-            render=False
-        ),
-        'function_status': gr.Textbox(
-            label="Function Status",
-            value=get_function_status,
-            interactive=False,
-            render=False
-        ),
-        'enable_all_button': gr.Button(
-            value="Enable All",
-            render=False
-        ),
-        'disable_all_button': gr.Button(
-            value="Disable All",
-            render=False
-        ),
-        'function_name': gr.Textbox(
-            label="Function Name",
-            placeholder="e.g., get_weather",
-            render=False
-        ),
-        'function_description': gr.Textbox(
-            label="Function Description",
-            placeholder="Describe what the function does",
-            render=False
-        ),
-        'function_parameters': gr.Code(
-            label="Function Parameters (JSON Schema)",
-            language="json",
-            value='{\n  "type": "object",\n  "properties": {\n    "param1": {\n      "type": "string",\n      "description": "Description of param1"\n    }\n  },\n  "required": ["param1"]\n}',
-            render=False
-        ),
-        'add_function_button': gr.Button(
-            value="Add Function",
-            render=False
-        ),
-        'function_list': gr.Dataframe(
-            headers=["Name", "Description", "Enabled"],
-            value=get_functions_df(),
-            row_count=5,
-            render=False,
-            interactive=True
-        ),
-        'toggle_function_name': gr.Textbox(
-            label="Function Name to Toggle",
-            render=False
-        ),
-        'toggle_function_enabled': gr.Checkbox(
-            label="Enable",
-            value=True,
-            render=False
-        ),
-        'toggle_function_button': gr.Button(
-            value="Toggle Function",
-            render=False
-        ),
-        'remove_function_name': gr.Textbox(
-            label="Function Name to Remove",
-            render=False
-        ),
-        'remove_function_button': gr.Button(
-            value="Remove Function",
-            render=False
-        ),
-        'function_operation_status': gr.Textbox(
-            label="Operation Status",
-            interactive=False,
-            render=False
-        ),
-        'test_function_select': gr.Dropdown(
-            label="Select Function to Test",
-            choices=function_manager.get_function_names(),
-            value=None,
-            render=False,
-            interactive=True
-        ),
-        'test_parameters_preview': gr.Code(
-            label="Parameters Schema (read-only)",
-            language="json",
-            value="",
-            render=False
-        ),
-        'test_arguments': gr.Code(
-            label="Arguments (JSON)",
-            language="json",
-            value="{}",
-            render=False
-        ),
-        'execute_test_button': gr.Button(
-            value="Execute Test",
-            render=False
-        ),
-        'test_result': gr.Code(
-            label="Result",
-            language="json",
-            value="",
-            render=False
-        ),
-        'history_table': gr.Dataframe(
-            headers=["Time", "Function", "Arguments", "Result", "Error"],
-            value=get_initial_history_df(),
-            row_count=5,
-            render=False,
-            interactive=False
-        ),
-        'clear_history_button': gr.Button(
-            value="Clear History",
-            render=False
-        ),
-        'export_button': gr.Button(
-            value="Export Custom Functions JSON",
-            render=False
-        ),
-        'export_json': gr.Code(
-            label="Exported JSON",
-            language="json",
-            value="",
-            render=False
-        ),
-        'import_json': gr.Code(
-            label="Import JSON",
-            language="json",
-            value="[]",
-            render=False
-        ),
-        'import_button': gr.Button(
-            value="Import Functions",
-            render=False
-        ),
-        'tools_preview_button': gr.Button(
-            value="Preview OpenAI Tools JSON",
-            render=False
-        ),
-        'tools_preview': gr.Code(
-            label="OpenAI Tools (Preview)",
-            language="json",
-            value="",
-            render=False
-        )
-    }
-
     completion_memory, completion_model_selector, completion_model_status, completion_load_button = create_model_controls()
     completion_params = create_generation_params()
 
@@ -2521,65 +1696,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     chat_rag_form['update_params_button'].render()
                     chat_rag_form['params_status'].render()
 
-                with gr.Accordion(label="Function Calling", open=False):
-                    with gr.Row():
-                        function_form['function_calling_enabled'].render()
-                        function_form['execution_mode'].render()
-
-                    function_form['function_status'].render()
-
-                    with gr.Row():
-                        function_form['enable_all_button'].render()
-                        function_form['disable_all_button'].render()
-
-                    gr.Markdown("### Available Functions")
-                    function_form['function_list'].render()
-
-                    gr.Markdown("### Add Custom Function")
-                    function_form['function_name'].render()
-                    function_form['function_description'].render()
-                    function_form['function_parameters'].render()
-                    function_form['add_function_button'].render()
-
-                    gr.Markdown("### Manage Functions")
-                    with gr.Row():
-                        function_form['toggle_function_name'].render()
-                        function_form['toggle_function_enabled'].render()
-                        function_form['toggle_function_button'].render()
-
-                    with gr.Row():
-                        function_form['remove_function_name'].render()
-                        function_form['remove_function_button'].render()
-
-                    function_form['function_operation_status'].render()
-
-                    gr.Markdown("### Test & History")
-                    with gr.Row():
-                        function_form['test_function_select'].render()
-                    with gr.Row():
-                        function_form['test_parameters_preview'].render()
-                    with gr.Row():
-                        function_form['test_arguments'].render()
-                    with gr.Row():
-                        function_form['execute_test_button'].render()
-                    with gr.Row():
-                        function_form['test_result'].render()
-                    with gr.Row():
-                        function_form['history_table'].render()
-                        function_form['clear_history_button'].render()
-
-                    gr.Markdown("### Import / Export & Tools Preview")
-                    with gr.Row():
-                        function_form['export_button'].render()
-                        function_form['import_button'].render()
-                        function_form['tools_preview_button'].render()
-                    with gr.Row():
-                        function_form['export_json'].render()
-                    with gr.Row():
-                        function_form['import_json'].render()
-                    with gr.Row():
-                        function_form['tools_preview'].render()
-
             with gr.Column(scale=8):
                 with gr.Row(equal_height=True):
                     chat_system_prompt_textbox.render()
@@ -2639,7 +1755,7 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
                     fill_height=True,
                     fill_width=True,
                     save_history=True,
-                    additional_inputs=[chat_system_prompt_textbox] + list(chat_params.values()) + [chat_rag_form['rag_enabled'], rag_params['n_results'], function_form['function_calling_enabled']]
+                    additional_inputs=[chat_system_prompt_textbox] + list(chat_params.values()) + [chat_rag_form['rag_enabled'], rag_params['n_results']]
                 )
 
     with gr.Tab(get_text("Tab.completion"), interactive=True):
@@ -2739,113 +1855,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
         outputs=[chat_rag_form['params_status']]
     )
 
-    function_form['function_calling_enabled'].change(
-        fn=toggle_function_calling_enabled,
-        inputs=[function_form['function_calling_enabled']],
-        outputs=[function_form['function_operation_status']]
-    ).then(
-        fn=get_function_status,
-        outputs=[function_form['function_status']]
-    )
-
-    function_form['execution_mode'].change(
-        fn=set_function_execution_mode,
-        inputs=[function_form['execution_mode']],
-        outputs=[function_form['function_status']]
-    )
-
-    function_form['enable_all_button'].click(
-        fn=enable_all_functions,
-        outputs=[function_form['function_operation_status'], function_form['function_list'], function_form['function_status']]
-    )
-
-    function_form['disable_all_button'].click(
-        fn=disable_all_functions,
-        outputs=[function_form['function_operation_status'], function_form['function_list'], function_form['function_status']]
-    )
-
-    function_form['function_list'].change(
-        fn=apply_function_list_enabled_from_df,
-        inputs=[function_form['function_list']],
-        outputs=[function_form['function_operation_status'], function_form['function_status'], function_form['function_list']]
-    )
-
-    function_form['add_function_button'].click(
-        fn=add_custom_function,
-        inputs=[
-            function_form['function_name'],
-            function_form['function_description'],
-            function_form['function_parameters']
-        ],
-        outputs=[function_form['function_operation_status'], function_form['function_list']]
-    ).then(
-        fn=get_function_status,
-        outputs=[function_form['function_status']]
-    ).then(
-        fn=update_test_function_choices,
-        outputs=[function_form['test_function_select']]
-    )
-
-    function_form['toggle_function_button'].click(
-        fn=toggle_function,
-        inputs=[
-            function_form['toggle_function_name'],
-            function_form['toggle_function_enabled']
-        ],
-        outputs=[function_form['function_operation_status'], function_form['function_list']]
-    ).then(
-        fn=get_function_status,
-        outputs=[function_form['function_status']]
-    ).then(
-        fn=update_test_function_choices,
-        outputs=[function_form['test_function_select']]
-    )
-
-    function_form['remove_function_button'].click(
-        fn=remove_function,
-        inputs=[function_form['remove_function_name']],
-        outputs=[function_form['function_operation_status'], function_form['function_list']]
-    ).then(
-        fn=get_function_status,
-        outputs=[function_form['function_status']]
-    ).then(
-        fn=update_test_function_choices,
-        outputs=[function_form['test_function_select']]
-    )
-
-    function_form['test_function_select'].change(
-        fn=get_function_schema_and_sample,
-        inputs=[function_form['test_function_select']],
-        outputs=[function_form['test_parameters_preview'], function_form['test_arguments']]
-    )
-
-    function_form['execute_test_button'].click(
-        fn=execute_function_test,
-        inputs=[function_form['test_function_select'], function_form['test_arguments']],
-        outputs=[function_form['test_result'], function_form['function_operation_status'], function_form['history_table']]
-    )
-
-    function_form['clear_history_button'].click(
-        fn=clear_function_history,
-        outputs=[function_form['history_table'], function_form['function_operation_status']]
-    )
-
-    function_form['export_button'].click(
-        fn=export_custom_functions_json,
-        outputs=[function_form['export_json']]
-    )
-
-    function_form['import_button'].click(
-        fn=import_custom_functions_from_json,
-        inputs=[function_form['import_json']],
-        outputs=[function_form['function_operation_status'], function_form['function_list'], function_form['function_status'], function_form['test_function_select']]
-    )
-
-    function_form['tools_preview_button'].click(
-        fn=get_openai_tools_preview,
-        outputs=[function_form['tools_preview']]
-    )
-
     app.load(
         fn=update_model_management_models_list,
         outputs=[model_list]
@@ -2869,12 +1878,6 @@ with gr.Blocks(fill_height=True, fill_width=True, title="Chat with MLX") as app:
     ).then(
         fn=get_rag_status,
         outputs=[chat_rag_form['rag_status']]
-    ).then(
-        fn=get_function_status,
-        outputs=[function_form['function_status']]
-    ).then(
-        fn=update_test_function_choices,
-        outputs=[function_form['test_function_select']]
     )
 
 
