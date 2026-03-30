@@ -72,6 +72,9 @@ MULTI_LANGUAGE = {
                             "repetition_penalty": {
                                 "label": "Repetition Penalty"
                             },
+                            "presence_penalty": {
+                                "label": "Presence Penalty"
+                            },
                             "diversity_penalty": {
                                 "label": "Diversity Penalty"
                             }
@@ -174,6 +177,14 @@ MULTI_LANGUAGE = {
                         },
                         "default_system_prompt": {
                             "label": "Default System Prompt"
+                        },
+                        "detected_capabilities": {
+                            "label": "Detection Status"
+                        }
+                    },
+                    "CheckboxGroup": {
+                        "multimodal_ability_override": {
+                            "label": "Multimodal Abilities"
                         }
                     },
                     "Dropdown": {
@@ -184,7 +195,7 @@ MULTI_LANGUAGE = {
                             "label": "Default Language"
                         },
                         "multimodal_ability": {
-                            "label": "Multimodal Ability"
+                            "label": "Detected Abilities"
                         }
                     },
                     "Button": {

@@ -5,4 +5,4 @@
 .venv
 
 chat_with_mlx_refresh/models
-chat_with_mlx_refresh/__pycache__
+**/__pycache__

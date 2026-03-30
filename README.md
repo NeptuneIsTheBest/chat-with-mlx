@@ -100,6 +100,8 @@ You no longer need to add models by manually editing configuration files, you on
 
 You can add various models from [mlx-community](https://huggingface.co/mlx-community). Models will be automatically downloaded from HuggingFace.
 
+When you add a model from the UI, multimodal abilities can be auto-detected to prefill the form. After you save the configuration, the saved `multimodal_ability` value is what the app uses at load time.
+
 For the following configuration files, the model files will be stored in `models/models/Ministral-8B-Instruct-2410-4bit`.
 
 **Ministral-8B-Instruct-2410-4bit.json**
@@ -122,7 +124,7 @@ For the following configuration files, the model files will be stored in `models
 - `quantize`: The quantization format of the model (e.g., `4bit`).
 - `default_language`: Default language setting (e.g., `multi` for multilingual support).
 - `system_prompt`: The system prompt of the model.
-- `multimodal_ability`: The multimodal capabilities of the model.
+- `multimodal_ability`: The effective multimodal capabilities used when loading the model. An empty list forces text-only loading.
 
 ## Contributing
 
