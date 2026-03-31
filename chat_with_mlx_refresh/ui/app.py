@@ -37,6 +37,7 @@ def create_app(context: AppContext) -> gr.Blocks:
         completion_fn=completion_service.managed_completion_generator,
         bind_fn=lambda ui: bind_events(
             ui=ui,
+            chat_service=chat_service,
             runtime_service=runtime_service,
             model_management_service=model_management_service,
             rag_service=context.rag_service,

@@ -2,15 +2,18 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Any, AsyncIterator, Dict, Iterator, List, Optional, Tuple
+from typing import Any, AsyncIterator, Iterator, Optional
 
 from ..model import BaseLocalModel, Message, MessageRole, ModelManager, MultimodalModel
 from .async_stream import ThreadedGeneratorBridge
+from .context_management import ContextManagementService
 from .error_handling import raise_gradio_error
 from .files import FileService
+from .prompt_cache import PromptCacheService, PromptTokenRecorder, create_empty_prompt_cache_state
 from .rag import RAGService
-from .streaming import generate_response_and_stream
+from .streaming import StreamSession
 
 
 logger = logging.getLogger(__name__)
@@ -43,7 +46,7 @@ def normalize_sampling_params(
     min_p: float,
     repetition_penalty: float,
     presence_penalty: float,
-) -> Dict[str, float]:
+) -> dict[str, float]:
     return {
         "temperature": float(temperature),
         "top_k": int(top_k),
@@ -74,6 +77,8 @@ class ChatService:
         self.file_service = file_service
         self.rag_service = rag_service
         self.generation_stop_event = generation_stop_event
+        self.context_management = ContextManagementService()
+        self.prompt_cache_service = PromptCacheService()
 
     def get_loaded_model(self) -> BaseLocalModel:
         model = self.model_manager.get_loaded_model()
@@ -87,16 +92,74 @@ class ChatService:
             return file_entry
         if isinstance(file_entry, dict):
             path = file_entry.get("path")
-            return str(path) if path else None
+            if path:
+                return str(path)
+            file_value = file_entry.get("file")
+            if isinstance(file_value, dict):
+                nested_path = file_value.get("path")
+                return str(nested_path) if nested_path else None
+            if file_value:
+                return str(file_value)
+            value = file_entry.get("value")
+            if isinstance(value, dict):
+                nested_path = value.get("path")
+                return str(nested_path) if nested_path else None
+            if isinstance(value, str) and Path(value).suffix:
+                return value
+            return None
         path = getattr(file_entry, "path", None)
         if path:
             return str(path)
         return None
 
-    def _classify_file_entries(self, file_entries: List[Any]) -> Tuple[List[str], List[str], List[str]]:
-        document_paths: List[str] = []
-        image_paths: List[str] = []
-        audio_paths: List[str] = []
+    def _collect_content_parts(
+        self,
+        content: Any,
+        text_parts: list[str],
+        file_entries: list[Any],
+    ) -> None:
+        if content is None:
+            return
+
+        if isinstance(content, str):
+            text_parts.append(content)
+            return
+
+        if isinstance(content, dict):
+            normalized_path = self._normalize_file_path(content)
+            if normalized_path:
+                file_entries.append({"path": normalized_path})
+
+            for key in ("text", "value", "content"):
+                nested = content.get(key)
+                if nested is not None and nested is not content:
+                    self._collect_content_parts(nested, text_parts, file_entries)
+            return
+
+        if isinstance(content, Sequence) and not isinstance(content, (bytes, bytearray, str)):
+            for item in content:
+                self._collect_content_parts(item, text_parts, file_entries)
+            return
+
+        normalized_path = self._normalize_file_path(content)
+        if normalized_path:
+            file_entries.append(content)
+
+    def _extract_history_item_content(self, history_item: dict[str, Any]) -> tuple[str, list[Any]]:
+        text_parts: list[str] = []
+        file_entries: list[Any] = []
+        self._collect_content_parts(history_item.get("content"), text_parts, file_entries)
+
+        files = history_item.get("files", [])
+        if isinstance(files, list):
+            file_entries.extend(files)
+
+        return "".join(text_parts), file_entries
+
+    def _classify_file_entries(self, file_entries: list[Any]) -> tuple[list[str], list[str], list[str]]:
+        document_paths: list[str] = []
+        image_paths: list[str] = []
+        audio_paths: list[str] = []
 
         for file_entry in file_entries:
             normalized_path = self._normalize_file_path(file_entry)
@@ -117,19 +180,11 @@ class ChatService:
             self._deduplicate_paths(audio_paths),
         )
 
-    def _classify_message_files(self, message: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
+    def _classify_message_files(self, message: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
         return self._classify_file_entries(list(message.get("files", [])))
 
-    def _classify_history_item_files(self, history_item: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
-        file_entries: List[Any] = []
-        current_content = history_item.get("content")
-        if isinstance(current_content, tuple):
-            file_entries.extend(list(current_content))
-
-        files = history_item.get("files", [])
-        if isinstance(files, list):
-            file_entries.extend(files)
-
+    def _classify_history_item_files(self, history_item: dict[str, Any]) -> tuple[list[str], list[str], list[str]]:
+        _, file_entries = self._extract_history_item_content(history_item)
         return self._classify_file_entries(file_entries)
 
     @staticmethod
@@ -138,7 +193,7 @@ class ChatService:
             return text_content
         return str(text_content) if text_content is not None else ""
 
-    def _load_document_contents(self, document_paths: List[str]) -> str:
+    def _load_document_contents(self, document_paths: list[str]) -> str:
         content_parts = []
         for file_path_str in document_paths:
             if not file_path_str:
@@ -148,30 +203,26 @@ class ChatService:
                 content_parts.append(file_content)
         return "".join(content_parts)
 
-    def _history_item_has_files(self, history_item: Dict[str, Any]) -> bool:
-        current_content = history_item.get("content")
-        if isinstance(current_content, tuple) and current_content:
-            return True
-
-        files = history_item.get("files", [])
-        return isinstance(files, list) and bool(files)
+    def _history_item_has_files(self, history_item: dict[str, Any]) -> bool:
+        _, file_entries = self._extract_history_item_content(history_item)
+        return bool(file_entries)
 
     def _preprocess_conversation(
         self,
-        message: Dict[str, Any],
-        history: List[Dict[str, Any]],
-        document_paths: Optional[List[str]] = None,
-    ) -> Tuple[str, List[Dict[str, Any]], List[Dict[str, List[str]]]]:
+        message: dict[str, Any],
+        history: list[dict[str, Any]],
+        document_paths: Optional[list[str]] = None,
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, list[str]]]]:
         processed_message_text = self._load_document_contents(document_paths or [])
         processed_message_text += self._normalize_text_content(message.get("text", ""))
 
-        preprocessed_history: List[Dict[str, Any]] = []
-        turn_media: List[Dict[str, List[str]]] = []
+        preprocessed_history: list[dict[str, Any]] = []
+        turn_media: list[dict[str, list[str]]] = []
         index = 0
         while index < len(history):
             current_item_original = history[index]
             current_processed_item = current_item_original.copy()
-            current_content = current_item_original.get("content")
+            current_text_content, current_file_entries = self._extract_history_item_content(current_item_original)
             document_paths_in_item, image_paths_in_item, audio_paths_in_item = self._classify_history_item_files(
                 current_item_original
             )
@@ -180,16 +231,16 @@ class ChatService:
                 "audios": audio_paths_in_item,
             }
 
-            if isinstance(current_content, tuple):
+            if current_file_entries and not current_text_content:
                 final_combined_content = self._load_document_contents(document_paths_in_item)
                 next_text = ""
                 consumed_next_item = False
                 if index + 1 < len(history):
                     next_original_item = history[index + 1]
-                    next_content = next_original_item.get("content")
+                    next_content, next_file_entries = self._extract_history_item_content(next_original_item)
                     if (
-                        isinstance(next_content, str)
-                        and not self._history_item_has_files(next_original_item)
+                        next_content
+                        and not next_file_entries
                         and next_original_item.get("role") == current_item_original.get("role")
                     ):
                         next_text = next_content
@@ -201,7 +252,7 @@ class ChatService:
                 index += 2 if consumed_next_item else 1
                 continue
 
-            normalized_content = self._normalize_text_content(current_content)
+            normalized_content = self._normalize_text_content(current_text_content)
             if document_paths_in_item:
                 normalized_content = self._load_document_contents(document_paths_in_item) + normalized_content
             current_processed_item["content"] = normalized_content
@@ -212,7 +263,7 @@ class ChatService:
         return processed_message_text, preprocessed_history, turn_media
 
     @staticmethod
-    def _deduplicate_paths(paths: List[str]) -> List[str]:
+    def _deduplicate_paths(paths: list[str]) -> list[str]:
         seen = set()
         deduplicated = []
         for path in paths:
@@ -225,7 +276,7 @@ class ChatService:
     def _validate_multimodal_inputs(
         self,
         model_instance: BaseLocalModel,
-        turn_media: List[Dict[str, List[str]]],
+        turn_media: list[dict[str, list[str]]],
     ) -> None:
         if any(len(item.get("audios", [])) > 1 for item in turn_media):
             raise RuntimeError("Only one audio file is supported per message.")
@@ -238,14 +289,20 @@ class ChatService:
         if audio_paths and not model_instance.supports_multimodal_ability("audio"):
             raise RuntimeError("The loaded model does not support audio inputs.")
 
+    @staticmethod
+    def _flatten_turn_media(turn_media: list[dict[str, list[str]]]) -> tuple[list[str], list[str]]:
+        image_paths = [path for item in turn_media for path in item.get("images", [])]
+        audio_paths = [path for item in turn_media for path in item.get("audios", [])]
+        return image_paths, audio_paths
+
     def _prepare_model_inputs(
         self,
-        current_message_dict: Dict[str, Any],
-        history_list: List[Dict[str, Any]],
+        current_message_dict: dict[str, Any],
+        history_list: list[dict[str, Any]],
         system_prompt: Optional[str],
         model_instance: BaseLocalModel,
-    ) -> Tuple[str, List[Dict[str, Any]], List[str], List[str], List[Dict[str, List[str]]]]:
-        effective_history: List[Dict[str, Any]] = []
+    ) -> tuple[str, list[dict[str, Any]], list[dict[str, list[str]]]]:
+        effective_history: list[dict[str, Any]] = []
         if system_prompt and system_prompt.strip():
             effective_history.append(Message(MessageRole.SYSTEM, content=system_prompt).to_dict())
         effective_history.extend(history_list)
@@ -268,22 +325,26 @@ class ChatService:
         current_turn_media = {"images": image_paths, "audios": audio_paths}
         turn_media = history_turn_media + [current_turn_media]
         self._validate_multimodal_inputs(model_instance, turn_media)
+        return processed_message_text, processed_history_list, turn_media
 
-        flattened_image_paths = [path for item in turn_media for path in item.get("images", [])]
-        flattened_audio_paths = [path for item in turn_media for path in item.get("audios", [])]
-        return processed_message_text, processed_history_list, flattened_image_paths, flattened_audio_paths, turn_media
-
-    def _apply_rag_if_needed(self, message: Dict[str, Any], rag_enabled: bool, rag_n_results: int) -> Dict[str, Any]:
+    def _apply_rag_if_needed(self, message: dict[str, Any], rag_enabled: bool, rag_n_results: int) -> dict[str, Any]:
         if not rag_enabled or not message.get("text"):
             return message
         new_message = dict(message)
         new_message["text"] = self.rag_service.enhance_message(message.get("text", ""), rag_enabled, rag_n_results)
         return new_message
 
+    def reset_context_state(self, auto_manage_context: bool = True) -> tuple[dict[str, Any], str]:
+        return self.context_management.reset_context_state(auto_manage_context)
+
+    def reset_chat_state(self, auto_manage_context: bool = True) -> tuple[dict[str, Any], str, dict[str, Any]]:
+        summary_state, status_text = self.reset_context_state(auto_manage_context)
+        return summary_state, status_text, create_empty_prompt_cache_state()
+
     def handle_chat(
         self,
-        message: Dict[str, Any],
-        history: List[Dict[str, Any]],
+        message: dict[str, Any],
+        history: list[dict[str, Any]],
         system_prompt: Optional[str] = None,
         temperature: float = 1.0,
         top_k: int = 20,
@@ -294,50 +355,107 @@ class ChatService:
         presence_penalty: float = 1.5,
         rag_enabled: bool = False,
         rag_n_results: int = 5,
+        auto_manage_context: bool = True,
+        context_summary_state: Optional[dict[str, Any]] = None,
+        prompt_cache_state: Optional[dict[str, Any]] = None,
         stream: bool = True,
     ) -> Iterator[Any]:
         try:
             message = self._apply_rag_if_needed(message, rag_enabled, rag_n_results)
-            model = self.get_loaded_model()
-            ensure_model_has_chat_template(model)
+            with self.model_manager.reserve_loaded_model() as model:
+                ensure_model_has_chat_template(model)
 
-            processed_message_text, processed_history_list, image_paths, audio_paths, turn_media = self._prepare_model_inputs(
-                message,
-                history,
-                system_prompt,
-                model,
-            )
-            sampling = normalize_sampling_params(temperature, top_k, top_p, min_p, repetition_penalty, presence_penalty)
-            response_args = {
-                "message": processed_message_text,
-                "history": processed_history_list,
-                "stream": stream,
-                "max_tokens": max_tokens,
-                **sampling,
-            }
-            if isinstance(model, MultimodalModel):
-                response_args["images"] = image_paths
-                response_args["audios"] = audio_paths
-                response_args["turn_media"] = turn_media
+                processed_message_text, processed_history_list, turn_media = self._prepare_model_inputs(
+                    message,
+                    history,
+                    system_prompt,
+                    model,
+                )
+                context_result = self.context_management.manage_chat_context(
+                    model=model,
+                    message_text=processed_message_text,
+                    history=processed_history_list,
+                    turn_media=turn_media,
+                    max_tokens=max_tokens,
+                    auto_manage_context=auto_manage_context,
+                    summary_state=context_summary_state,
+                )
+                image_paths, audio_paths = self._flatten_turn_media(context_result.turn_media)
+                sampling = normalize_sampling_params(
+                    temperature,
+                    top_k,
+                    top_p,
+                    min_p,
+                    repetition_penalty,
+                    presence_penalty,
+                )
+                response_args = {
+                    "message": processed_message_text,
+                    "history": context_result.history,
+                    "stream": stream,
+                    "max_tokens": max_tokens,
+                    **sampling,
+                }
+                current_message = Message(MessageRole.USER, processed_message_text).to_dict()
+                formatted_prompt = model.format_chat_prompt(
+                    message=current_message,
+                    history=context_result.history,
+                    turn_media=context_result.turn_media,
+                )
+                response_args["formatted_prompt"] = formatted_prompt
 
-            yield from generate_response_and_stream(
-                model=model,
-                response_args=response_args,
-                eos_token=get_eos_token_from_model(model),
-                stream=stream,
-                generation_stop_event=self.generation_stop_event,
-                thinking_title="Thinking",
-                inline_thought_title="Thinking",
-                thinking_id=0,
-                base_messages=[],
-            )
+                cache_plan = self.prompt_cache_service.prepare_chat_generation(
+                    model=model,
+                    prompt=formatted_prompt,
+                    turn_media=context_result.turn_media,
+                    state=prompt_cache_state,
+                )
+                if cache_plan is not None:
+                    response_args["prompt_token_ids"] = cache_plan.prompt_token_ids
+                    response_args["prompt_cache"] = cache_plan.prompt_cache
+                    response_args["cached_prefix_len"] = cache_plan.cached_prefix_len
+                    if cache_plan.prepared_inputs is not None:
+                        response_args["prepared_inputs"] = cache_plan.prepared_inputs
+
+                if isinstance(model, MultimodalModel):
+                    response_args["images"] = image_paths
+                    response_args["audios"] = audio_paths
+                    response_args["turn_media"] = context_result.turn_media
+
+                prompt_token_recorder = PromptTokenRecorder()
+                session = StreamSession(
+                    response_stream=model.generate_response(**response_args),
+                    eos_token=get_eos_token_from_model(model),
+                    stream=stream,
+                    generation_stop_event=self.generation_stop_event,
+                    thinking_title="Thinking",
+                    inline_thought_title="Thinking",
+                    thinking_id=0,
+                    base_messages=[],
+                    chunk_observer=prompt_token_recorder.observe,
+                )
+                transient_prompt_cache_state = create_empty_prompt_cache_state()
+                last_payload = None
+                for payload in session:
+                    last_payload = payload
+                    yield payload, context_result.summary_state, context_result.status_text, transient_prompt_cache_state
+
+                if cache_plan is not None and not self.generation_stop_event.is_set():
+                    updated_prompt_cache_state = self.prompt_cache_service.build_success_state(
+                        model=model,
+                        plan=cache_plan,
+                        generated_token_ids=prompt_token_recorder.token_ids,
+                    )
+                    final_payload = session.final_messages or last_payload
+                    if final_payload is not None:
+                        yield final_payload, context_result.summary_state, context_result.status_text, updated_prompt_cache_state
         except Exception as exc:
             raise_gradio_error(exc, logger=logger, action="handle chat requests")
 
     async def managed_chat_generator(
         self,
-        message: Dict[str, Any],
-        history: List[Dict[str, Any]],
+        message: dict[str, Any],
+        history: list[dict[str, Any]],
         system_prompt: Optional[str] = None,
         temperature: float = 1.0,
         top_k: int = 20,
@@ -348,6 +466,9 @@ class ChatService:
         presence_penalty: float = 1.5,
         rag_enabled: bool = False,
         rag_n_results: int = 5,
+        auto_manage_context: bool = True,
+        context_summary_state: Optional[dict[str, Any]] = None,
+        prompt_cache_state: Optional[dict[str, Any]] = None,
         stream: bool = True,
     ) -> AsyncIterator[Any]:
         try:
@@ -364,6 +485,9 @@ class ChatService:
                 presence_penalty=presence_penalty,
                 rag_enabled=rag_enabled,
                 rag_n_results=rag_n_results,
+                auto_manage_context=auto_manage_context,
+                context_summary_state=context_summary_state,
+                prompt_cache_state=prompt_cache_state,
                 stream=stream,
             )
             await asyncio.to_thread(self.model_manager.close_active_generator)
@@ -374,7 +498,8 @@ class ChatService:
                 async for chunk in bridge:
                     yield chunk
             finally:
-                bridge.close()
+                bridge.close(wait=False)
+                await asyncio.to_thread(bridge.wait_closed)
                 self.model_manager.remove_active_generator(bridge)
         except Exception as exc:
             raise_gradio_error(exc, logger=logger, action="stream chat responses")

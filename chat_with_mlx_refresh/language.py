@@ -78,6 +78,16 @@ MULTI_LANGUAGE = {
                             "diversity_penalty": {
                                 "label": "Diversity Penalty"
                             }
+                        },
+                        "Checkbox": {
+                            "auto_manage_context": {
+                                "label": "Auto-manage context"
+                            }
+                        },
+                        "Textbox": {
+                            "context_status": {
+                                "label": "Context Status"
+                            }
                         }
                     },
                     "RAGSetting": {
@@ -233,7 +243,8 @@ MULTI_LANGUAGE = {
                     "Messages": {
                         "no_model_selected": "Please select a model to delete",
                         "config_deleted": "Model configuration '{}' has been deleted successfully.",
-                        "config_and_files_deleted": "Model '{}' and its files have been deleted successfully."
+                        "config_and_files_deleted": "Model '{}' and its files have been deleted successfully.",
+                        "cleanup_warning_suffix": "Runtime cleanup reported warnings. Check logs for details."
                     }
                 }
             }

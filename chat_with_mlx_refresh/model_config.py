@@ -3,11 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 import re
 import shutil
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Iterable, Optional
 
 from huggingface_hub import hf_hub_download
 
@@ -19,13 +21,13 @@ class ModelConfig:
     quantize: Optional[str] = None
     default_language: str = "multi"
     system_prompt: Optional[str] = None
-    multimodal_ability: List[str] = field(default_factory=list)
+    multimodal_ability: list[str] = field(default_factory=list)
     display_name: Optional[str] = None
     custom_system_prompt: Optional[str] = field(default=None, repr=False, compare=False)
     config_path: Optional[Path] = field(default=None, repr=False, compare=False)
 
     @classmethod
-    def from_dict(cls, payload: Dict[str, Any]) -> "ModelConfig":
+    def from_dict(cls, payload: dict[str, Any]) -> "ModelConfig":
         return cls(
             mlx_repo=(payload.get("mlx_repo") or "").strip(),
             model_name=(payload.get("model_name") or "").strip(),
@@ -36,7 +38,7 @@ class ModelConfig:
             display_name=payload.get("display_name"),
         )
 
-    def to_dict(self) -> Dict[str, Any]:
+    def to_dict(self) -> dict[str, Any]:
         return {
             "mlx_repo": self.mlx_repo,
             "model_name": self.model_name,
@@ -52,7 +54,7 @@ class ModelConfig:
         model_name: str,
         default_language: str,
         quantize: Optional[str],
-        multimodal_ability: Optional[List[str]] = None,
+        multimodal_ability: Optional[list[str]] = None,
     ) -> str:
         parts = [default_language, quantize or "None"]
         if multimodal_ability:
@@ -72,6 +74,16 @@ class ModelConfig:
 
 
 class ModelConfigStore:
+    CAPABILITY_MODE_TEXT_ONLY = "Text only"
+    CAPABILITY_MODE_AUTO_DETECT = "Auto detect"
+    CAPABILITY_MODE_MANUAL_OVERRIDE = "Manual override"
+    VALID_CAPABILITY_MODES = frozenset(
+        {
+            CAPABILITY_MODE_TEXT_ONLY,
+            CAPABILITY_MODE_AUTO_DETECT,
+            CAPABILITY_MODE_MANUAL_OVERRIDE,
+        }
+    )
     VALID_QUANTIZE_TYPES = frozenset(
         {"None", "2bit", "3bit", "4bit", "5bit", "6bit", "8bit", "bf16", "bf32"}
     )
@@ -119,7 +131,7 @@ class ModelConfigStore:
                 f"default_language must be one of {self.VALID_LANGUAGES}, got: '{default_language}'"
             )
 
-    def _validate_multimodal_ability(self, abilities: Optional[List[str]]) -> None:
+    def _validate_multimodal_ability(self, abilities: Optional[list[str]]) -> None:
         if not abilities:
             return
 
@@ -127,6 +139,12 @@ class ModelConfigStore:
         invalid_abilities = abilities_set - self.VALID_MULTIMODAL_ABILITIES
         if invalid_abilities:
             raise ValueError(f"Invalid multimodal abilities: {invalid_abilities}")
+
+    def _validate_capability_mode(self, multimodal_mode: str) -> None:
+        if multimodal_mode not in self.VALID_CAPABILITY_MODES:
+            raise ValueError(
+                f"multimodal_mode must be one of {self.VALID_CAPABILITY_MODES}, got: '{multimodal_mode}'"
+            )
 
     @staticmethod
     def _extract_repo_name(repo: str) -> str:
@@ -150,7 +168,7 @@ class ModelConfigStore:
         slug = self._slugify(display_name)
         return f"{slug}-{self._short_hash(display_name)}{self.CONFIG_EXTENSION}"
 
-    def _process_multimodal_abilities(self, abilities: Optional[List[str]]) -> List[str]:
+    def _process_multimodal_abilities(self, abilities: Optional[list[str]]) -> list[str]:
         if not abilities:
             return []
 
@@ -174,7 +192,7 @@ class ModelConfigStore:
         return False
 
     @classmethod
-    def detect_multimodal_abilities_from_payload(cls, payload: Dict[str, Any]) -> List[str]:
+    def detect_multimodal_abilities_from_payload(cls, payload: dict[str, Any]) -> list[str]:
         detected = []
         if cls._payload_contains_any_key(payload, cls.VISION_CONFIG_KEYS):
             detected.append("vision")
@@ -183,13 +201,13 @@ class ModelConfigStore:
         return detected
 
     @staticmethod
-    def format_multimodal_abilities(abilities: Optional[List[str]]) -> str:
+    def format_multimodal_abilities(abilities: Optional[list[str]]) -> str:
         normalized = abilities or []
         if not normalized:
             return "Text only"
         return " + ".join(ability.capitalize() for ability in normalized)
 
-    def _load_detection_payload(self, config_path: Path) -> Dict[str, Any]:
+    def _load_detection_payload(self, config_path: Path) -> dict[str, Any]:
         try:
             with config_path.open("r", encoding="utf-8") as file_obj:
                 return json.load(file_obj)
@@ -200,11 +218,11 @@ class ModelConfigStore:
         except OSError as exc:
             raise RuntimeError(f"Failed to read config file: {config_path}") from exc
 
-    def detect_multimodal_abilities_from_model_path(self, model_path: Path) -> List[str]:
+    def detect_multimodal_abilities_from_model_path(self, model_path: Path) -> list[str]:
         payload = self._load_detection_payload(model_path / self.REMOTE_CONFIG_FILENAME)
         return self.detect_multimodal_abilities_from_payload(payload)
 
-    def detect_multimodal_abilities_from_repo(self, mlx_repo: str) -> List[str]:
+    def detect_multimodal_abilities_from_repo(self, mlx_repo: str) -> list[str]:
         self._validate_repo_format(mlx_repo, "mlx_repo")
         try:
             config_path = Path(
@@ -220,7 +238,7 @@ class ModelConfigStore:
         payload = self._load_detection_payload(config_path)
         return self.detect_multimodal_abilities_from_payload(payload)
 
-    def detect_multimodal_abilities(self, model_config: ModelConfig) -> List[str]:
+    def detect_multimodal_abilities(self, model_config: ModelConfig) -> list[str]:
         model_path = self.get_model_path(model_config)
         if model_path.exists():
             return self.detect_multimodal_abilities_from_model_path(model_path)
@@ -246,12 +264,42 @@ class ModelConfigStore:
 
     def _save_config_to_file(self, model_config: ModelConfig) -> None:
         config_path = self.get_config_path(model_config)
+        temp_path = None
         try:
-            with config_path.open("w", encoding="utf-8") as file_obj:
+            with tempfile.NamedTemporaryFile(
+                "w",
+                encoding="utf-8",
+                dir=config_path.parent,
+                prefix=f"{config_path.stem}.",
+                suffix=".tmp",
+                delete=False,
+            ) as file_obj:
+                temp_path = Path(file_obj.name)
                 json.dump(model_config.to_dict(), file_obj, ensure_ascii=False, indent=4)
+                file_obj.flush()
+                os.fsync(file_obj.fileno())
+            os.replace(temp_path, config_path)
             model_config.config_path = config_path
         except OSError as exc:
-            raise RuntimeError(f"Failed to save config to {config_path}: {exc}") from exc
+            cleanup_error: Optional[OSError] = None
+            if temp_path is not None:
+                try:
+                    temp_path.unlink(missing_ok=True)
+                except OSError as cleanup_exc:
+                    cleanup_error = cleanup_exc
+                    logging.warning(
+                        "Failed to remove temporary config file %s after save failure for %s: %s",
+                        temp_path,
+                        config_path,
+                        cleanup_exc,
+                        exc_info=cleanup_exc,
+                    )
+            error_message = f"Failed to save config to {config_path}: {exc}"
+            if cleanup_error is not None and temp_path is not None:
+                error_message = (
+                    f"{error_message}. Temporary file may remain at {temp_path}: {cleanup_error}"
+                )
+            raise RuntimeError(error_message) from exc
 
     def add_config(
         self,
@@ -260,20 +308,34 @@ class ModelConfigStore:
         quantize: str = "None",
         default_language: str = "multi",
         system_prompt: Optional[str] = None,
-        multimodal_ability_override: Optional[List[str]] = None,
+        multimodal_mode: str = CAPABILITY_MODE_TEXT_ONLY,
+        multimodal_ability_override: Optional[list[str]] = None,
     ) -> ModelConfig:
         self._validate_repo_format(mlx_repo, "mlx_repo")
         self._validate_quantize(quantize)
         self._validate_language(default_language)
+        self._validate_capability_mode(multimodal_mode)
 
         normalized_override = self._process_multimodal_abilities(multimodal_ability_override)
         self._validate_multimodal_ability(normalized_override)
 
-        detected_multimodal_ability = normalized_override
-        if multimodal_ability_override is None:
-            detected_multimodal_ability = self._process_multimodal_abilities(
-                self.detect_multimodal_abilities_from_repo(mlx_repo)
-            )
+        resolved_multimodal_ability: list[str] = []
+        if multimodal_mode == self.CAPABILITY_MODE_TEXT_ONLY:
+            resolved_multimodal_ability = []
+        elif multimodal_mode == self.CAPABILITY_MODE_AUTO_DETECT:
+            try:
+                resolved_multimodal_ability = self._process_multimodal_abilities(
+                    self.detect_multimodal_abilities_from_repo(mlx_repo)
+                )
+            except Exception as exc:
+                raise RuntimeError(
+                    "Auto detect failed for this repository. "
+                    "Switch to Text only or Manual override if the model is not mlx-vlm compatible."
+                ) from exc
+        elif multimodal_mode == self.CAPABILITY_MODE_MANUAL_OVERRIDE:
+            if not normalized_override:
+                raise ValueError("Select at least one ability when using Manual override.")
+            resolved_multimodal_ability = normalized_override
 
         config = ModelConfig(
             mlx_repo=mlx_repo.strip(),
@@ -281,7 +343,7 @@ class ModelConfigStore:
             quantize=None if quantize == "None" else quantize,
             default_language=default_language,
             system_prompt=system_prompt.strip() if system_prompt else None,
-            multimodal_ability=detected_multimodal_ability,
+            multimodal_ability=resolved_multimodal_ability,
         )
         config.display_name = self._generate_display_name(config)
         if config.resolved_display_name in self.load_configs():
@@ -330,8 +392,8 @@ class ModelConfigStore:
         model_config.display_name = self._generate_display_name(model_config)
         return model_config
 
-    def load_configs(self) -> Dict[str, ModelConfig]:
-        model_configs: Dict[str, ModelConfig] = {}
+    def load_configs(self) -> dict[str, ModelConfig]:
+        model_configs: dict[str, ModelConfig] = {}
         for config_file in self.configs_dir.glob(f"*{self.CONFIG_EXTENSION}"):
             if not config_file.is_file():
                 continue

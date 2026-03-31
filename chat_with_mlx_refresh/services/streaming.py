@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterable, Iterator, List, Optional, Tuple
+from typing import Any, Callable, Iterable, Iterator, Optional
 
 from gradio.components.chatbot import ChatMessage
 
@@ -66,7 +66,7 @@ def is_supported_chunk_type(chunk: Any) -> bool:
     return bool(hasattr(chunk, "choices") and chunk.choices)
 
 
-def trim_to_eos_if_streaming(text: str, eos_token: Optional[str], stream: bool) -> Tuple[str, bool]:
+def trim_to_eos_if_streaming(text: str, eos_token: Optional[str], stream: bool) -> tuple[str, bool]:
     if stream and eos_token and eos_token in text:
         if text == eos_token:
             return "", True
@@ -74,7 +74,7 @@ def trim_to_eos_if_streaming(text: str, eos_token: Optional[str], stream: bool) 
     return text, False
 
 
-def filter_chatml_tokens_and_stop(text: str, control_tokens: List[str], stop_tokens: List[str]) -> Tuple[str, bool]:
+def filter_chatml_tokens_and_stop(text: str, control_tokens: list[str], stop_tokens: list[str]) -> tuple[str, bool]:
     should_stop = False
     filtered = text
     for stop_token in stop_tokens:
@@ -92,13 +92,13 @@ def strip_answer_tags(text: str) -> str:
     return text.replace("<answer>", "").replace("</answer>", "")
 
 
-def merge_with_partial_buffer(prior_buffer: str, text: str, partial_prefixes: List[str]) -> Tuple[str, str]:
+def merge_with_partial_buffer(prior_buffer: str, text: str, partial_prefixes: list[str]) -> tuple[str, str]:
     merged = f"{prior_buffer}{text}" if prior_buffer else text
     if not merged:
         return merged, ""
 
     new_buffer = ""
-    for partial in partial_prefixes:
+    for partial in sorted(partial_prefixes, key=len, reverse=True):
         if merged.endswith(partial):
             new_buffer = partial
             merged = merged[:-len(partial)]
@@ -112,21 +112,22 @@ class StreamSession:
     eos_token: Optional[str]
     stream: bool
     generation_stop_event: Any
-    control_tokens: List[str] = field(default_factory=lambda: CHATML_CONTROL_TOKENS)
-    stop_tokens: List[str] = field(default_factory=lambda: CHATML_STOP_TOKENS)
-    partial_prefixes: List[str] = field(default_factory=lambda: DEFAULT_PARTIAL_PREFIXES)
+    control_tokens: list[str] = field(default_factory=lambda: CHATML_CONTROL_TOKENS)
+    stop_tokens: list[str] = field(default_factory=lambda: CHATML_STOP_TOKENS)
+    partial_prefixes: list[str] = field(default_factory=lambda: DEFAULT_PARTIAL_PREFIXES)
     thinking_title: str = "Thinking"
     inline_thought_title: str = "Thinking"
     thinking_id: int = 0
-    base_messages: List[Any] = field(default_factory=list)
+    base_messages: list[Any] = field(default_factory=list)
     chat_message_accumulator: Any = field(default_factory=lambda: ChatMessage(role="assistant", content=""))
     thinking_message: Optional[Any] = None
     full_response: str = ""
-    final_messages: List[Any] = field(default_factory=list)
+    final_messages: list[Any] = field(default_factory=list)
+    chunk_observer: Optional[Callable[[Any], None]] = None
 
-    def __iter__(self) -> Iterator[List[Dict[str, Any]]]:
-        final_content_parts: List[str] = []
-        thinking_content_parts: List[str] = []
+    def __iter__(self) -> Iterator[list[dict[str, Any]]]:
+        final_content_parts: list[str] = []
+        thinking_content_parts: list[str] = []
         in_thinking = False
         thinking_start_time: Optional[float] = None
         chunk_buffer = ""
@@ -134,6 +135,8 @@ class StreamSession:
         for chunk in self.response_stream:
             if self.generation_stop_event.is_set():
                 break
+            if self.chunk_observer is not None:
+                self.chunk_observer(chunk)
 
             chunk_text = parse_chunk_text(chunk)
             if not chunk_text:
@@ -149,6 +152,37 @@ class StreamSession:
 
             chunk_text, should_stop = filter_chatml_tokens_and_stop(chunk_text, self.control_tokens, self.stop_tokens)
             chunk_text = strip_answer_tags(chunk_text)
+
+            if not in_thinking and "<think>" in chunk_text and "</think>" in chunk_text:
+                think_match = re.search(r"<think>(.*?)</think>", chunk_text, re.DOTALL)
+                if think_match:
+                    extracted = think_match.group(1)
+                    self.thinking_message = ChatMessage(
+                        role="assistant",
+                        content=extracted,
+                        metadata={
+                            "title": self.inline_thought_title,
+                            "id": self.thinking_id,
+                            "status": "done",
+                            "duration": 0.1,
+                        },
+                    )
+                    before_think = chunk_text[:chunk_text.find("<think>")]
+                    after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
+                    if before_think:
+                        final_content_parts.append(before_think)
+                    if after_think:
+                        final_content_parts.append(after_think)
+                    self.chat_message_accumulator.content = "".join(final_content_parts)
+
+                    if self.stream:
+                        payload = self.base_messages + [self.thinking_message]
+                        if self.chat_message_accumulator.content:
+                            payload.append(self.chat_message_accumulator)
+                        yield payload
+                    if should_stop or eos_hit:
+                        break
+                    continue
 
             if should_stop:
                 if in_thinking:
@@ -218,35 +252,6 @@ class StreamSession:
                 in_thinking = False
                 continue
 
-            if not in_thinking and "<think>" in chunk_text and "</think>" in chunk_text:
-                think_match = re.search(r"<think>(.*?)</think>", chunk_text, re.DOTALL)
-                if think_match:
-                    extracted = think_match.group(1)
-                    self.thinking_message = ChatMessage(
-                        role="assistant",
-                        content=extracted,
-                        metadata={
-                            "title": self.inline_thought_title,
-                            "id": self.thinking_id,
-                            "status": "done",
-                            "duration": 0.1,
-                        },
-                    )
-                    before_think = chunk_text[:chunk_text.find("<think>")]
-                    after_think = chunk_text[chunk_text.find("</think>") + len("</think>"):]
-                    if before_think:
-                        final_content_parts.append(before_think)
-                    if after_think:
-                        final_content_parts.append(after_think)
-                    self.chat_message_accumulator.content = "".join(final_content_parts)
-
-                    if self.stream:
-                        payload = self.base_messages + [self.thinking_message]
-                        if self.chat_message_accumulator.content:
-                            payload.append(self.chat_message_accumulator)
-                        yield payload
-                    continue
-
             final_content_parts.append(chunk_text)
             self.chat_message_accumulator.content = "".join(final_content_parts)
             if self.stream:
@@ -277,15 +282,16 @@ class StreamSession:
 
 def generate_response_and_stream(
     model: Any,
-    response_args: Dict[str, Any],
+    response_args: dict[str, Any],
     eos_token: Optional[str],
     stream: bool,
     generation_stop_event: Any,
     thinking_title: str = "Thinking",
     inline_thought_title: str = "Thinking",
     thinking_id: int = 0,
-    base_messages: Optional[List[Any]] = None,
-) -> Iterator[List[Dict[str, Any]]]:
+    base_messages: Optional[list[Any]] = None,
+    chunk_observer: Optional[Callable[[Any], None]] = None,
+) -> Iterator[list[dict[str, Any]]]:
     session = StreamSession(
         response_stream=model.generate_response(**response_args),
         eos_token=eos_token,
@@ -295,5 +301,6 @@ def generate_response_and_stream(
         inline_thought_title=inline_thought_title,
         thinking_id=thinking_id,
         base_messages=base_messages or [],
+        chunk_observer=chunk_observer,
     )
     yield from session

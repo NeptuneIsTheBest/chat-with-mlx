@@ -65,8 +65,7 @@ class RuntimeService:
 
     @gradio_error_boundary("read the default system prompt", logger)
     def get_default_system_prompt(self) -> Optional[str]:
-        self.get_loaded_model()
-        return self.model_manager.get_system_prompt(default=True)
+        return self.get_default_system_prompt_value()
 
     @staticmethod
     def update_slider_config(
@@ -74,7 +73,7 @@ class RuntimeService:
         slider_new_max: Union[int, float],
         slider_value: Union[int, float, None],
     ):
-        if not slider_new_min or not slider_new_max or slider_new_min > slider_new_max:
+        if slider_new_min is None or slider_new_max is None or slider_new_min > slider_new_max:
             return gr.update()
 
         value_to_set = slider_value if slider_value is not None else (slider_new_min + slider_new_max) / 2
@@ -87,30 +86,19 @@ class RuntimeService:
     def update_model_max_length(self, slider_value: Union[int, float, None]):
         default_max_length = 32768
         try:
-            model = self.get_loaded_model()
+            with self.model_manager.reserve_loaded_model() as model:
+                max_length = default_max_length
+                if isinstance(model, (TextModel, MultimodalModel)):
+                    max_length = model.max_position_embeddings or default_max_length
+                    if max_length <= 0:
+                        max_length = default_max_length
+                return self.update_slider_config(1, max_length, slider_value)
         except RuntimeError:
             return self.update_slider_config(1, default_max_length, slider_value)
         except Exception as exc:
             log_service_exception(
                 logger,
                 "resolve the loaded model before updating max token limits",
-                exc,
-                level=logging.WARNING,
-                include_traceback=False,
-            )
-            return self.update_slider_config(1, default_max_length, slider_value)
-
-        try:
-            max_length = default_max_length
-            if isinstance(model, (TextModel, MultimodalModel)):
-                max_length = model.max_position_embeddings or default_max_length
-                if max_length <= 0:
-                    max_length = default_max_length
-            return self.update_slider_config(1, max_length, slider_value)
-        except Exception as exc:
-            log_service_exception(
-                logger,
-                "update max token limits from the loaded model metadata",
                 exc,
                 level=logging.WARNING,
                 include_traceback=False,

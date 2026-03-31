@@ -71,56 +71,57 @@ class CompletionService:
         min_p: float = 0.0,
         max_tokens: int = 512,
         repetition_penalty: float = 1.0,
+        presence_penalty: float = 1.5,
         stream: bool = True,
     ) -> Iterator[str] | Optional[str]:
         try:
-            model = self._get_loaded_model()
+            with self.model_manager.reserve_loaded_model() as model:
+                params = {
+                    "stream": stream,
+                    "temperature": float(temperature),
+                    "top_k": top_k,
+                    "top_p": float(top_p),
+                    "min_p": min_p,
+                    "max_tokens": max_tokens,
+                    "repetition_penalty": float(repetition_penalty),
+                    "presence_penalty": float(presence_penalty),
+                }
 
-            params = {
-                "stream": stream,
-                "temperature": float(temperature),
-                "top_k": top_k,
-                "top_p": float(top_p),
-                "min_p": min_p,
-                "max_tokens": max_tokens,
-                "repetition_penalty": float(repetition_penalty),
-            }
+                if not stream:
+                    completion_result = model.generate_completion(prompt=prompt, **params)
+                    completion_text = parse_chunk_text(completion_result) or str(completion_result)
+                    completion_text, _ = self._sanitize_completion_text(completion_text, self._get_eos_token(model))
+                    return f"{prompt}{completion_text}"
 
-            if not stream:
-                completion_result = model.generate_completion(prompt=prompt, **params)
-                completion_text = parse_chunk_text(completion_result) or str(completion_result)
-                completion_text, _ = self._sanitize_completion_text(completion_text, self._get_eos_token(model))
-                return f"{prompt}{completion_text}"
+                response_text = prompt
+                eos_token = self._get_eos_token(model)
+                chunk_buffer = ""
+                for chunk in model.generate_completion(prompt=prompt, **params):
+                    if self.generation_stop_event.is_set():
+                        break
 
-            response_parts = [prompt]
-            eos_token = self._get_eos_token(model)
-            chunk_buffer = ""
-            for chunk in model.generate_completion(prompt=prompt, **params):
-                if self.generation_stop_event.is_set():
-                    break
+                    chunk_text = parse_chunk_text(chunk)
+                    if not chunk_text:
+                        if not is_supported_chunk_type(chunk):
+                            logger.warning("Unexpected chunk type from model: %s", type(chunk))
+                        continue
 
-                chunk_text = parse_chunk_text(chunk)
-                if not chunk_text:
-                    if not is_supported_chunk_type(chunk):
-                        logger.warning("Unexpected chunk type from model: %s", type(chunk))
-                    continue
+                    chunk_text, chunk_buffer = merge_with_partial_buffer(
+                        chunk_buffer,
+                        chunk_text,
+                        COMPLETION_PARTIAL_PREFIXES,
+                    )
+                    if not chunk_text:
+                        continue
 
-                chunk_text, chunk_buffer = merge_with_partial_buffer(
-                    chunk_buffer,
-                    chunk_text,
-                    COMPLETION_PARTIAL_PREFIXES,
-                )
-                if not chunk_text:
-                    continue
+                    chunk_text, should_stop = self._sanitize_completion_text(chunk_text, eos_token)
+                    if chunk_text:
+                        response_text += chunk_text
+                        yield response_text
 
-                chunk_text, should_stop = self._sanitize_completion_text(chunk_text, eos_token)
-                if chunk_text:
-                    response_parts.append(chunk_text)
-                    yield "".join(response_parts)
-
-                if should_stop:
-                    break
-            return None
+                    if should_stop:
+                        break
+                return None
         except Exception as exc:
             raise_gradio_error(exc, logger=logger, action="handle completion requests")
 
@@ -133,6 +134,7 @@ class CompletionService:
         min_p: float = 0.0,
         max_tokens: int = 512,
         repetition_penalty: float = 1.0,
+        presence_penalty: float = 1.5,
         stream: bool = True,
     ) -> AsyncIterator[str]:
         try:
@@ -144,6 +146,7 @@ class CompletionService:
                 min_p=min_p,
                 max_tokens=max_tokens,
                 repetition_penalty=repetition_penalty,
+                presence_penalty=presence_penalty,
                 stream=stream,
             )
             await asyncio.to_thread(self.model_manager.close_active_generator)
@@ -154,7 +157,8 @@ class CompletionService:
                 async for chunk in bridge:
                     yield chunk
             finally:
-                bridge.close()
+                bridge.close(wait=False)
+                await asyncio.to_thread(bridge.wait_closed)
                 self.model_manager.remove_active_generator(bridge)
         except Exception as exc:
             raise_gradio_error(exc, logger=logger, action="stream completion responses")

@@ -37,7 +37,7 @@ class ThreadedGeneratorBridge:
     async def iterate(self) -> AsyncIterator[Any]:
         self._start()
         if self._queue is None:
-            self.close()
+            self.close(wait=False)
             return
 
         try:
@@ -49,9 +49,9 @@ class ThreadedGeneratorBridge:
                     raise item.exception
                 yield item
         finally:
-            self.close()
+            self.close(wait=False)
 
-    def close(self) -> None:
+    def close(self, wait: bool = True) -> None:
         with self._lock:
             if self._closed:
                 return
@@ -62,11 +62,20 @@ class ThreadedGeneratorBridge:
         if not self._finished.is_set():
             self.stop_event.set()
 
-        if thread is not None and threading.current_thread() is not thread:
+        if wait and thread is not None and threading.current_thread() is not thread:
             thread.join()
         elif not started:
             self._close_iterator()
             self._finished.set()
+
+    def wait_closed(self, timeout: Optional[float] = None) -> None:
+        thread = None
+        with self._lock:
+            thread = self._thread
+        if thread is not None and threading.current_thread() is not thread:
+            thread.join(timeout=timeout)
+        else:
+            self._finished.wait(timeout=timeout)
 
     def _start(self) -> None:
         with self._lock:

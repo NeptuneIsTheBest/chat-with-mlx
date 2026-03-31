@@ -3,7 +3,8 @@ from __future__ import annotations
 import argparse
 import atexit
 import logging
-from typing import Optional, Tuple
+import threading
+from typing import Optional
 
 import gradio as gr
 
@@ -14,8 +15,9 @@ from .ui import create_app
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.INFO)
 
-_runtime: Tuple[Optional[AppContext], Optional[gr.Blocks]] = (None, None)
+_runtime: tuple[Optional[AppContext], Optional[gr.Blocks]] = (None, None)
 _exit_registered = False
+_runtime_lock = threading.Lock()
 
 
 def _close_runtime() -> None:
@@ -24,16 +26,19 @@ def _close_runtime() -> None:
         context.close()
 
 
-def get_runtime() -> Tuple[AppContext, gr.Blocks]:
+def get_runtime() -> tuple[AppContext, gr.Blocks]:
     global _runtime, _exit_registered
     context, app = _runtime
     if context is None or app is None:
-        context = AppContext()
-        app = create_app(context)
-        _runtime = (context, app)
-        if not _exit_registered:
-            atexit.register(_close_runtime)
-            _exit_registered = True
+        with _runtime_lock:
+            context, app = _runtime
+            if context is None or app is None:
+                context = AppContext()
+                app = create_app(context)
+                _runtime = (context, app)
+                if not _exit_registered:
+                    atexit.register(_close_runtime)
+                    _exit_registered = True
     return context, app
 
 

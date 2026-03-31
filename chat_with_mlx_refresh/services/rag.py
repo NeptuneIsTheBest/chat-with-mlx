@@ -4,7 +4,7 @@ import hashlib
 import logging
 import threading
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Tuple
+from typing import Any, Iterable, Optional
 
 import chromadb
 from langchain_text_splitters import RecursiveCharacterTextSplitter
@@ -15,7 +15,7 @@ from .error_handling import (
     gradio_error_boundary,
     log_service_exception,
 )
-from .files import FileService, get_canonical_file_path, get_file_md5
+from .files import FileService, get_canonical_file_path
 
 
 logger = logging.getLogger(__name__)
@@ -46,7 +46,8 @@ class RAGService:
             chunk_overlap=self.chunk_overlap,
         )
         self.collection: Optional[Any] = self._create_collection()
-        self.indexed_sources: Dict[str, str] = {}
+        self.indexed_sources: dict[str, str] = {}
+        self._rehydrate_indexed_sources()
         self.enabled = False
 
     def _create_collection(self) -> Any:
@@ -87,9 +88,51 @@ class RAGService:
         return get_canonical_file_path(file_path)
 
     @classmethod
-    def _build_source_id(cls, file_path: Path) -> str:
-        source_key = f"{cls._get_source_path(file_path)}:{get_file_md5(file_path)}"
+    def _build_source_id(cls, source_path: str, file_content: str) -> str:
+        content_hash = hashlib.sha1(file_content.encode("utf-8")).hexdigest()
+        source_key = f"{source_path}:{content_hash}"
         return hashlib.sha1(source_key.encode("utf-8")).hexdigest()
+
+    def _delete_stale_source_ids(self, collection: Any, source_ids: Iterable[str], source_label: str) -> None:
+        for stale_source_id in source_ids:
+            try:
+                collection.delete(where={"source_id": stale_source_id})
+            except Exception as exc:
+                log_service_exception(
+                    logger,
+                    f"remove stale RAG chunks for '{source_label}'",
+                    exc,
+                    level=logging.WARNING,
+                    include_traceback=False,
+                )
+
+    def _rehydrate_indexed_sources(self) -> None:
+        try:
+            collection = self._get_collection()
+            payload = collection.get(include=["metadatas"])
+        except Exception as exc:
+            log_service_exception(
+                logger,
+                "rehydrate the RAG index state",
+                exc,
+                level=logging.WARNING,
+                include_traceback=False,
+            )
+            return
+
+        indexed_sources: dict[str, str] = {}
+        for metadata in payload.get("metadatas") or []:
+            if not isinstance(metadata, dict):
+                continue
+            source_name = metadata.get("source_name")
+            source_path = metadata.get("source_path")
+            source_id = metadata.get("source_id")
+            source_key = source_path or source_name
+            if source_key and source_id:
+                indexed_sources[source_key] = source_id
+
+        with self._lock:
+            self.indexed_sources = indexed_sources
 
     def update_parameters(
         self,
@@ -118,70 +161,88 @@ class RAGService:
                 )
             return updated
 
-    def add_document(self, file_path: Path, file_content: str) -> Tuple[bool, str]:
+    def add_document(self, file_path: Path, file_content: str) -> tuple[bool, str]:
+        source_name = file_path.name
+        source_path = self._get_source_path(file_path)
+        source_id = self._build_source_id(source_path, file_content)
         with self._lock:
-            source_path = self._get_source_path(file_path)
-            source_id = self._build_source_id(file_path)
             existing_source_id = self.indexed_sources.get(source_path)
+            legacy_source_id = self.indexed_sources.get(source_name)
+            stale_source_ids = {
+                candidate
+                for candidate in (existing_source_id, legacy_source_id)
+                if candidate is not None and candidate != source_id
+            }
+
             if existing_source_id == source_id:
+                if stale_source_ids:
+                    self._delete_stale_source_ids(self._get_collection(), stale_source_ids, source_name)
+                    self.indexed_sources[source_path] = source_id
+                    self.indexed_sources.pop(source_name, None)
                 return False, f"Document '{file_path.name}' is already indexed."
 
             chunks = self.text_splitter.split_text(file_content)
             if not chunks:
                 return False, f"No content to index in document '{file_path.name}'."
 
-            collection = self._get_collection()
-            if existing_source_id is not None:
-                collection.delete(where={"source_path": source_path})
-
             embeddings = self._ensure_embedding_model().encode(chunks, show_progress_bar=True, batch_size=32)
             ids = [f"{source_id}_{index}" for index in range(len(chunks))]
             metadata = [
                 {
                     "source_id": source_id,
-                    "source_name": file_path.name,
+                    "source_name": source_name,
                     "source_path": source_path,
                     "chunk_id": index,
                 }
                 for index in range(len(chunks))
             ]
+
+            collection = self._get_collection()
             collection.add(embeddings=embeddings, documents=chunks, metadatas=metadata, ids=ids)
+
+            if stale_source_ids:
+                self._delete_stale_source_ids(collection, stale_source_ids, source_name)
+
             self.indexed_sources[source_path] = source_id
+            self.indexed_sources.pop(source_name, None)
             return True, f"Document '{file_path.name}' indexed with {len(chunks)} chunks."
 
     def retrieve(self, query: str, n_results: Optional[int] = None) -> str:
         with self._lock:
-            collection = self._get_collection()
-            if collection.count() == 0:
-                return ""
-
-            query_embeddings = self._ensure_embedding_model().encode([query], show_progress_bar=False)
             result_count = n_results if n_results is not None else self.n_results
-            results = collection.query(
-                query_embeddings=query_embeddings,
-                n_results=min(result_count, collection.count()),
-            )
+            similarity_threshold = self.similarity_threshold
 
-            documents = results.get("documents", [[]])[0]
-            if not documents:
-                return ""
+        collection = self._get_collection()
+        collection_count = collection.count()
+        if collection_count == 0:
+            return ""
 
-            distances = results.get("distances")
-            if not distances or distances[0] is None:
-                return "\n\n".join(documents)
+        query_embeddings = self._ensure_embedding_model().encode([query], show_progress_bar=False)
+        results = collection.query(
+            query_embeddings=query_embeddings,
+            n_results=min(result_count, collection_count),
+        )
 
-            filtered_docs = []
-            for index, document in enumerate(documents):
-                distance = distances[0][index] if index < len(distances[0]) else None
-                if distance is None:
-                    filtered_docs.append(document)
-                    continue
+        documents = results.get("documents", [[]])[0]
+        if not documents:
+            return ""
 
-                similarity = 1 - distance
-                if similarity >= self.similarity_threshold:
-                    filtered_docs.append(document)
+        distances = results.get("distances")
+        if not distances or distances[0] is None:
+            return "\n\n".join(documents)
 
-            return "\n\n".join(filtered_docs) if filtered_docs else ""
+        filtered_docs = []
+        for index, document in enumerate(documents):
+            distance = distances[0][index] if index < len(distances[0]) else None
+            if distance is None:
+                filtered_docs.append(document)
+                continue
+
+            similarity = 1 - distance
+            if similarity >= similarity_threshold:
+                filtered_docs.append(document)
+
+        return "\n\n".join(filtered_docs) if filtered_docs else ""
 
     def clear_index(self) -> None:
         with self._lock:
@@ -216,12 +277,19 @@ class RAGService:
         with self._lock:
             return self.enabled
 
-    def get_status(self) -> Tuple[bool, str]:
+    def get_status(self) -> tuple[bool, str]:
         with self._lock:
-            if not self.indexed_sources:
-                return False, "RAG Index is empty."
-            total_chunks = self._get_collection().count()
-            return True, f"Indexed {len(self.indexed_sources)} documents with {total_chunks} chunks."
+            indexed_count = len(self.indexed_sources)
+
+        total_chunks = self._get_collection().count()
+        if indexed_count == 0 and total_chunks > 0:
+            self._rehydrate_indexed_sources()
+            with self._lock:
+                indexed_count = len(self.indexed_sources)
+
+        if indexed_count == 0:
+            return False, "RAG Index is empty."
+        return True, f"Indexed {indexed_count} documents with {total_chunks} chunks."
 
     def get_status_text(self) -> str:
         try:
@@ -236,7 +304,7 @@ class RAGService:
             )
             return "RAG index status unavailable."
 
-    def get_parameters(self) -> Dict[str, float]:
+    def get_parameters(self) -> dict[str, float]:
         with self._lock:
             return {
                 "chunk_size": self.chunk_size,
@@ -245,7 +313,7 @@ class RAGService:
                 "similarity_threshold": self.similarity_threshold,
             }
 
-    def get_parameter_tuple(self) -> Tuple[int, int, int, float]:
+    def get_parameter_tuple(self) -> tuple[int, int, int, float]:
         params = self.get_parameters()
         return (
             params["chunk_size"],
@@ -255,33 +323,32 @@ class RAGService:
         )
 
     @gradio_error_boundary("upload files into the RAG index", logger)
-    def upload_and_index_files(self, files: Optional[Iterable[Any]], file_service: FileService) -> Tuple[str, str]:
-        with self._lock:
-            if not files:
-                return "No files selected.", self.get_status_text()
+    def upload_and_index_files(self, files: Optional[Iterable[Any]], file_service: FileService) -> tuple[str, str]:
+        if not files:
+            return "No files selected.", self.get_status_text()
 
-            results = []
-            for file_ref in files:
-                file_path = Path(getattr(file_ref, "name", file_ref))
-                try:
-                    file_content = file_service.load_file(file_path, raw_content_only=True)
-                    if file_content:
-                        _, message = self.add_document(file_path, file_content)
-                        results.append(f"{file_path.name}: {message}")
-                    else:
-                        results.append(f"{file_path.name}: Failed to load content")
-                except Exception as exc:
-                    log_service_exception(
-                        logger,
-                        f"index RAG document '{file_path.name}'",
-                        exc,
-                        level=logging.WARNING,
-                        include_traceback=False,
-                    )
-                    results.append(f"{file_path.name}: Error - {get_exception_message(exc)}")
-            return "\n".join(results), self.get_status_text()
+        results = []
+        for file_ref in files:
+            file_path = Path(getattr(file_ref, "name", file_ref))
+            try:
+                file_content = file_service.load_file_uncached(file_path, raw_content_only=True)
+                if file_content:
+                    _, message = self.add_document(file_path, file_content)
+                    results.append(f"{file_path.name}: {message}")
+                else:
+                    results.append(f"{file_path.name}: Failed to load content")
+            except Exception as exc:
+                log_service_exception(
+                    logger,
+                    f"index RAG document '{file_path.name}'",
+                    exc,
+                    level=logging.WARNING,
+                    include_traceback=False,
+                )
+                results.append(f"{file_path.name}: Error - {get_exception_message(exc)}")
+        return "\n".join(results), self.get_status_text()
 
-    def clear_index_with_status(self) -> Tuple[str, str]:
+    def clear_index_with_status(self) -> tuple[str, str]:
         try:
             self.clear_index()
             return "RAG index cleared successfully.", self._get_status_text_safe()
@@ -291,18 +358,24 @@ class RAGService:
 
     @gradio_error_boundary("toggle RAG mode", logger)
     def toggle_enabled(self, enabled: bool) -> str:
-        with self._lock:
-            if enabled:
-                self.enable()
-            else:
-                self.disable()
-            return f"RAG {'enabled' if enabled else 'disabled'}."
+        if enabled:
+            self.enable()
+        else:
+            self.disable()
+        return f"RAG {'enabled' if enabled else 'disabled'}."
 
-    def update_ui_parameters(self, chunk_size: int, chunk_overlap: int, similarity_threshold: float) -> str:
+    def update_ui_parameters(
+        self,
+        chunk_size: int,
+        chunk_overlap: int,
+        n_results: int,
+        similarity_threshold: float,
+    ) -> str:
         try:
             updated = self.update_parameters(
                 chunk_size=chunk_size,
                 chunk_overlap=chunk_overlap,
+                n_results=n_results,
                 similarity_threshold=similarity_threshold,
             )
         except Exception as exc:
@@ -314,29 +387,28 @@ class RAGService:
         return "RAG parameters updated."
 
     def enhance_message(self, message_text: str, rag_enabled: bool, n_results: int = 5) -> str:
-        with self._lock:
-            if not rag_enabled:
-                return message_text
+        if not rag_enabled:
+            return message_text
 
-            try:
-                retrieved_docs = self.retrieve(message_text, n_results=n_results)
-            except Exception as exc:
-                log_service_exception(
-                    logger,
-                    "retrieve documents from the RAG index",
-                    exc,
-                    level=logging.WARNING,
-                    include_traceback=False,
-                )
-                return message_text
+        try:
+            retrieved_docs = self.retrieve(message_text, n_results=n_results)
+        except Exception as exc:
+            log_service_exception(
+                logger,
+                "retrieve documents from the RAG index",
+                exc,
+                level=logging.WARNING,
+                include_traceback=False,
+            )
+            return message_text
 
-            if not retrieved_docs:
-                return message_text
+        if not retrieved_docs:
+            return message_text
 
-            return """
-                Based on the following relevant documents: {}
+        return """
+            Based on the following relevant documents: {}
 
-                ---
+            ---
 
-                User question: {}
-                """.format(retrieved_docs, message_text)
+            User question: {}
+            """.format(retrieved_docs, message_text)

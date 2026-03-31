@@ -3,7 +3,9 @@ from __future__ import annotations
 import gradio as gr
 
 from ..language import get_text
+from ..services.context_management import create_empty_context_summary_state, get_default_context_status
 from ..services.model_management import ModelManagementService
+from ..services.prompt_cache import create_empty_prompt_cache_state, delete_prompt_cache_state
 from ..services.rag import RAGService
 from ..services.runtime import RuntimeService
 from .components import AppUI, ChatUI, CompletionUI, ModelManagementUI, create_generation_params, create_model_controls, create_rag_params, create_textbox
@@ -40,6 +42,24 @@ def build_app_layout(
             value=get_text("Page.Chat.ChatSystemPromptBlock.Button.default_system_prompt.value"),
             render=False,
             scale=1,
+        )
+        chat_auto_manage_context_checkbox = gr.Checkbox(
+            label=get_text("Page.Chat.Accordion.AdvancedSetting.Checkbox.auto_manage_context.label"),
+            value=True,
+            interactive=True,
+            render=False,
+        )
+        chat_context_status_textbox = gr.Textbox(
+            label=get_text("Page.Chat.Accordion.AdvancedSetting.Textbox.context_status.label"),
+            value=get_default_context_status(),
+            interactive=False,
+            render=False,
+            lines=2,
+        )
+        chat_context_summary_state = gr.State(value=create_empty_context_summary_state())
+        chat_prompt_cache_state = gr.State(
+            value=create_empty_prompt_cache_state(),
+            delete_callback=delete_prompt_cache_state,
         )
         chat_rag_form = {
             "rag_enabled": gr.Checkbox(
@@ -122,16 +142,25 @@ def build_app_layout(
             "default_language": gr.Dropdown(
                 label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.default_language.label"),
                 choices=["multi"],
+                value="multi",
                 interactive=True,
                 render=False,
             ),
             "system_prompt": create_textbox("Page.ModelManagement.AddLocalModelBlock.Textbox.default_system_prompt.label"),
+            "multimodal_mode": gr.Dropdown(
+                label="Capability Mode",
+                choices=model_management_service.get_capability_mode_choices(),
+                value=ModelManagementService.CAPABILITY_MODE_TEXT_ONLY,
+                interactive=True,
+                render=False,
+            ),
             "multimodal_ability_override": gr.CheckboxGroup(
                 label=get_text("Page.ModelManagement.AddLocalModelBlock.CheckboxGroup.multimodal_ability_override.label"),
                 choices=["vision", "audio"],
                 value=[],
                 interactive=True,
                 render=False,
+                visible=False,
             ),
             "detected_capabilities": gr.Textbox(
                 label=get_text("Page.ModelManagement.AddLocalModelBlock.Textbox.detected_capabilities.label"),
@@ -194,6 +223,8 @@ def build_app_layout(
                         with gr.Group():
                             for slider in chat_params.values():
                                 slider.render()
+                            chat_auto_manage_context_checkbox.render()
+                            chat_context_status_textbox.render()
 
                     with gr.Accordion(label=get_text("Page.Chat.Accordion.RAGSetting.label"), open=False):
                         chat_rag_form["rag_enabled"].render()
@@ -249,7 +280,6 @@ def build_app_layout(
                             {"left": "$", "right": "$", "display": False},
                         ],
                     )
-                    chatbot.clear(fn=runtime_service.clear_cache)
                     gr.ChatInterface(
                         multimodal=True,
                         chatbot=chatbot,
@@ -265,7 +295,11 @@ def build_app_layout(
                             *chat_params.values(),
                             chat_rag_form["rag_enabled"],
                             rag_params["n_results"],
+                            chat_auto_manage_context_checkbox,
+                            chat_context_summary_state,
+                            chat_prompt_cache_state,
                         ],
+                        additional_outputs=[chat_context_summary_state, chat_context_status_textbox, chat_prompt_cache_state],
                     )
 
         with gr.Tab(get_text("Tab.completion"), interactive=True):
@@ -321,6 +355,7 @@ def build_app_layout(
                     local_model_form["quantize"].render()
                     local_model_form["default_language"].render()
                     local_model_form["system_prompt"].render()
+                    local_model_form["multimodal_mode"].render()
                     local_model_form["multimodal_ability_override"].render()
                     local_model_form["detected_capabilities"].render()
                     local_model_form["add_button"].render()
@@ -343,6 +378,10 @@ def build_app_layout(
             rag_params=rag_params,
             system_prompt=chat_system_prompt_textbox,
             default_system_prompt_button=chat_default_system_prompt_button,
+            auto_manage_context=chat_auto_manage_context_checkbox,
+            context_status=chat_context_status_textbox,
+            context_summary_state=chat_context_summary_state,
+            prompt_cache_state=chat_prompt_cache_state,
             rag_form=chat_rag_form,
             chatbot=chatbot,
         ),

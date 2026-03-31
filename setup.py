@@ -2,7 +2,7 @@ from setuptools import setup, find_packages
 
 setup(
     name="chat-with-mlx-refresh",
-    version="0.1.24",
+    version="0.1.25",
     author="NeptuneIsTheBest",
     author_email="13058097081a@gmail.com",
     description="An all-in-one chat Web UI based on the MLX framework, designed for Apple Silicon.",
@@ -10,7 +10,11 @@ setup(
     long_description_content_type="text/markdown",
     packages=find_packages(where="."),
     url="https://github.com/NeptuneIsTheBest/chat-with-mlx",
-    install_requires=open("requirements.txt").read().splitlines(),
+    install_requires=[
+        line.strip()
+        for line in open("requirements.txt").read().splitlines()
+        if line.strip() and not line.strip().startswith("#")
+    ],
     classifiers=[
         "Programming Language :: Python :: 3",
         "License :: OSI Approved :: MIT License",

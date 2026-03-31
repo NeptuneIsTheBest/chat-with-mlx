@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Optional
 
 import gradio as gr
 
@@ -14,11 +14,15 @@ class ChatUI:
     model_selector: gr.Dropdown
     model_status: gr.Textbox
     load_button: gr.Button
-    params: Dict[str, gr.Slider]
-    rag_params: Dict[str, gr.Slider]
+    params: dict[str, gr.Slider]
+    rag_params: dict[str, gr.Slider]
     system_prompt: gr.Textbox
     default_system_prompt_button: gr.Button
-    rag_form: Dict[str, Any]
+    auto_manage_context: gr.Checkbox
+    context_status: gr.Textbox
+    context_summary_state: gr.State
+    prompt_cache_state: gr.State
+    rag_form: dict[str, Any]
     chatbot: gr.Chatbot
 
 
@@ -28,13 +32,13 @@ class CompletionUI:
     model_selector: gr.Dropdown
     model_status: gr.Textbox
     load_button: gr.Button
-    params: Dict[str, gr.Slider]
+    params: dict[str, gr.Slider]
     interface: gr.Interface
 
 
 @dataclass
 class ModelManagementUI:
-    form: Dict[str, Any]
+    form: dict[str, Any]
     model_list: gr.Dataframe
 
 
@@ -71,7 +75,7 @@ def create_textbox(label_key, placeholder_key: Optional[str] = None, **kwargs):
     return gr.Textbox(**params)
 
 
-def create_model_controls(model_choices, status_value: Callable[[], str]) -> Tuple[gr.Textbox, gr.Dropdown, gr.Textbox, gr.Button]:
+def create_model_controls(model_choices, status_value: Callable[[], str]) -> tuple[gr.Textbox, gr.Dropdown, gr.Textbox, gr.Button]:
     memory_usage = gr.Textbox(
         label=get_text("Page.Chat.SystemStatusBlock.Textbox.memory_usage.label"),
         interactive=False,
@@ -92,7 +96,7 @@ def create_model_controls(model_choices, status_value: Callable[[], str]) -> Tup
     return memory_usage, model_selector, model_status, load_button
 
 
-def create_generation_params() -> Dict[str, gr.Slider]:
+def create_generation_params() -> dict[str, gr.Slider]:
     slider_configs = {
         "temperature": (0.0, 2.0, 1.0),
         "top_k": (0, 100, 20),
@@ -113,7 +117,7 @@ def create_generation_params() -> Dict[str, gr.Slider]:
     }
 
 
-def create_rag_params(rag_parameters) -> Dict[str, gr.Slider]:
+def create_rag_params(rag_parameters) -> dict[str, gr.Slider]:
     chunk_size, chunk_overlap, n_results, similarity_threshold = rag_parameters
     return {
         "chunk_size": gr.Slider(

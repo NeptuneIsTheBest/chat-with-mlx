@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from ..services.chat import ChatService
 from ..services.model_management import ModelManagementService
 from ..services.rag import RAGService
 from ..services.runtime import RuntimeService
@@ -15,6 +16,7 @@ def echo_value(value):
 
 def bind_events(
     ui: AppUI,
+    chat_service: ChatService,
     runtime_service: RuntimeService,
     model_management_service: ModelManagementService,
     rag_service: RAGService,
@@ -22,10 +24,33 @@ def bind_events(
     ui.chat.default_system_prompt_button.click(
         fn=runtime_service.get_default_system_prompt,
         outputs=[ui.chat.system_prompt],
+    ).then(
+        fn=runtime_service.model_manager.set_custom_prompt,
+        inputs=[ui.chat.system_prompt],
+    ).then(
+        fn=chat_service.reset_chat_state,
+        inputs=[ui.chat.auto_manage_context],
+        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
     ui.chat.system_prompt.change(
         fn=runtime_service.model_manager.set_custom_prompt,
         inputs=[ui.chat.system_prompt],
+    ).then(
+        fn=chat_service.reset_chat_state,
+        inputs=[ui.chat.auto_manage_context],
+        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+    )
+    ui.chat.auto_manage_context.change(
+        fn=chat_service.reset_chat_state,
+        inputs=[ui.chat.auto_manage_context],
+        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+    )
+    ui.chat.chatbot.clear(
+        fn=runtime_service.clear_cache,
+    ).then(
+        fn=chat_service.reset_chat_state,
+        inputs=[ui.chat.auto_manage_context],
+        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
 
     ui.chat.model_selector.select(
@@ -40,6 +65,9 @@ def bind_events(
     )
 
     ui.chat.load_button.click(
+        fn=runtime_service.stop_generation,
+        queue=False,
+    ).then(
         fn=runtime_service.chat_load_model_callback,
         inputs=[ui.chat.model_selector],
         outputs=[
@@ -61,9 +89,16 @@ def bind_events(
         fn=runtime_service.update_model_max_length,
         inputs=[ui.completion.params["max_tokens"]],
         outputs=[ui.completion.params["max_tokens"]],
+    ).then(
+        fn=chat_service.reset_chat_state,
+        inputs=[ui.chat.auto_manage_context],
+        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
 
     ui.completion.load_button.click(
+        fn=runtime_service.stop_generation,
+        queue=False,
+    ).then(
         fn=runtime_service.completion_load_model_callback,
         inputs=[ui.completion.model_selector],
         outputs=[
@@ -85,6 +120,10 @@ def bind_events(
         fn=runtime_service.update_model_max_length,
         inputs=[ui.completion.params["max_tokens"]],
         outputs=[ui.completion.params["max_tokens"]],
+    ).then(
+        fn=chat_service.reset_chat_state,
+        inputs=[ui.chat.auto_manage_context],
+        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
 
     ui.model_management.form["search_button"].click(
@@ -99,13 +138,38 @@ def bind_events(
             ui.model_management.form["model_name"],
             ui.model_management.form["mlx_repo"],
             ui.model_management.form["quantize"],
+        ],
+    ).then(
+        fn=model_management_service.update_multimodal_ui_state,
+        inputs=[
+            ui.model_management.form["mlx_repo"],
+            ui.model_management.form["multimodal_mode"],
+            ui.model_management.form["multimodal_ability_override"],
+        ],
+        outputs=[
             ui.model_management.form["multimodal_ability_override"],
             ui.model_management.form["detected_capabilities"],
         ],
     )
     ui.model_management.form["mlx_repo"].change(
-        fn=model_management_service.detect_model_capabilities_state,
-        inputs=[ui.model_management.form["mlx_repo"]],
+        fn=model_management_service.update_multimodal_ui_state,
+        inputs=[
+            ui.model_management.form["mlx_repo"],
+            ui.model_management.form["multimodal_mode"],
+            ui.model_management.form["multimodal_ability_override"],
+        ],
+        outputs=[
+            ui.model_management.form["multimodal_ability_override"],
+            ui.model_management.form["detected_capabilities"],
+        ],
+    )
+    ui.model_management.form["multimodal_mode"].change(
+        fn=model_management_service.update_multimodal_ui_state,
+        inputs=[
+            ui.model_management.form["mlx_repo"],
+            ui.model_management.form["multimodal_mode"],
+            ui.model_management.form["multimodal_ability_override"],
+        ],
         outputs=[
             ui.model_management.form["multimodal_ability_override"],
             ui.model_management.form["detected_capabilities"],
@@ -119,6 +183,7 @@ def bind_events(
             ui.model_management.form["quantize"],
             ui.model_management.form["default_language"],
             ui.model_management.form["system_prompt"],
+            ui.model_management.form["multimodal_mode"],
             ui.model_management.form["multimodal_ability_override"],
         ],
     ).then(
@@ -171,6 +236,10 @@ def bind_events(
         fn=runtime_service.update_model_max_length,
         inputs=[ui.completion.params["max_tokens"]],
         outputs=[ui.completion.params["max_tokens"]],
+    ).then(
+        fn=chat_service.reset_chat_state,
+        inputs=[ui.chat.auto_manage_context],
+        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
 
     ui.chat.rag_form["rag_enabled"].change(
@@ -192,6 +261,7 @@ def bind_events(
         inputs=[
             ui.chat.rag_params["chunk_size"],
             ui.chat.rag_params["chunk_overlap"],
+            ui.chat.rag_params["n_results"],
             ui.chat.rag_params["similarity_threshold"],
         ],
         outputs=[ui.chat.rag_form["params_status"]],
@@ -227,4 +297,8 @@ def bind_events(
     ).then(
         fn=rag_service.get_status_text,
         outputs=[ui.chat.rag_form["rag_status"]],
+    ).then(
+        fn=chat_service.reset_chat_state,
+        inputs=[ui.chat.auto_manage_context],
+        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
