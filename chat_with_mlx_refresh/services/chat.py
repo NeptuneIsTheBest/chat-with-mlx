@@ -13,6 +13,7 @@ from .error_handling import raise_gradio_error
 from .files import FileService
 from .prompt_cache import PromptCacheService, PromptTokenRecorder, create_empty_prompt_cache_state
 from .rag import RAGService
+from .structured_output import is_structured_ui_message
 from .streaming import StreamSession
 
 
@@ -309,11 +310,7 @@ class ChatService:
         effective_history = [
             history_item
             for history_item in effective_history
-            if not (
-                isinstance(history_item, dict)
-                and isinstance(history_item.get("metadata"), dict)
-                and history_item["metadata"].get("title") in ["Thinking"]
-            )
+            if not is_structured_ui_message(history_item)
         ]
 
         document_paths, image_paths, audio_paths = self._classify_message_files(current_message_dict)
@@ -440,13 +437,16 @@ class ChatService:
                     last_payload = payload
                     yield payload, context_result.summary_state, context_result.status_text, transient_prompt_cache_state
 
+                final_payload = session.final_messages or last_payload
+                if final_payload is not None and final_payload != last_payload:
+                    yield final_payload, context_result.summary_state, context_result.status_text, transient_prompt_cache_state
+
                 if cache_plan is not None and not self.generation_stop_event.is_set():
                     updated_prompt_cache_state = self.prompt_cache_service.build_success_state(
                         model=model,
                         plan=cache_plan,
                         generated_token_ids=prompt_token_recorder.token_ids,
                     )
-                    final_payload = session.final_messages or last_payload
                     if final_payload is not None:
                         yield final_payload, context_result.summary_state, context_result.status_text, updated_prompt_cache_state
         except Exception as exc:

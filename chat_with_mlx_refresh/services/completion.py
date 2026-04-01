@@ -7,26 +7,12 @@ from typing import Any, AsyncIterator, Iterator, Optional
 from ..model import BaseLocalModel, ModelManager
 from .async_stream import ThreadedGeneratorBridge
 from .error_handling import raise_gradio_error
-from .streaming import (
-    CHATML_CONTROL_TOKENS,
-    CHATML_STOP_TOKENS,
-    filter_chatml_tokens_and_stop,
-    is_supported_chunk_type,
-    merge_with_partial_buffer,
-    parse_chunk_text,
-)
+from .streaming import CHATML_CONTROL_TOKENS, CHATML_STOP_TOKENS, is_supported_chunk_type, parse_chunk_text
+from .structured_output import IncrementalTextSanitizer
 
 
 logger = logging.getLogger(__name__)
 COMPLETION_STOP_TOKENS = CHATML_STOP_TOKENS + ["<|im_start|>", "<|system|>", "<|user|>", "<|assistant|>"]
-
-
-def _build_partial_prefixes(tokens: list[str]) -> list[str]:
-    prefixes = {token[:index] for token in tokens for index in range(1, len(token))}
-    return sorted(prefixes, key=len)
-
-
-COMPLETION_PARTIAL_PREFIXES = _build_partial_prefixes(CHATML_CONTROL_TOKENS)
 
 
 class CompletionService:
@@ -47,20 +33,6 @@ class CompletionService:
         if getattr(model, "processor", None) and getattr(model.processor, "tokenizer", None):
             return model.processor.tokenizer.eos_token
         return None
-
-    @staticmethod
-    def _sanitize_completion_text(text: str, eos_token: Optional[str]) -> tuple[str, bool]:
-        eos_hit = False
-        if eos_token and eos_token in text:
-            text = text.split(eos_token)[0]
-            eos_hit = True
-
-        filtered, should_stop = filter_chatml_tokens_and_stop(
-            text,
-            CHATML_CONTROL_TOKENS,
-            COMPLETION_STOP_TOKENS,
-        )
-        return filtered, eos_hit or should_stop
 
     def handle_completion(
         self,
@@ -90,12 +62,21 @@ class CompletionService:
                 if not stream:
                     completion_result = model.generate_completion(prompt=prompt, **params)
                     completion_text = parse_chunk_text(completion_result) or str(completion_result)
-                    completion_text, _ = self._sanitize_completion_text(completion_text, self._get_eos_token(model))
-                    return f"{prompt}{completion_text}"
+                    sanitizer = IncrementalTextSanitizer(
+                        control_tokens=CHATML_CONTROL_TOKENS,
+                        stop_tokens=COMPLETION_STOP_TOKENS,
+                        eos_token=self._get_eos_token(model),
+                    )
+                    sanitized = sanitizer.feed(completion_text)
+                    tail = sanitizer.finalize()
+                    return f"{prompt}{sanitized.text}{tail.text}"
 
                 response_text = prompt
-                eos_token = self._get_eos_token(model)
-                chunk_buffer = ""
+                sanitizer = IncrementalTextSanitizer(
+                    control_tokens=CHATML_CONTROL_TOKENS,
+                    stop_tokens=COMPLETION_STOP_TOKENS,
+                    eos_token=self._get_eos_token(model),
+                )
                 for chunk in model.generate_completion(prompt=prompt, **params):
                     if self.generation_stop_event.is_set():
                         break
@@ -106,21 +87,22 @@ class CompletionService:
                             logger.warning("Unexpected chunk type from model: %s", type(chunk))
                         continue
 
-                    chunk_text, chunk_buffer = merge_with_partial_buffer(
-                        chunk_buffer,
-                        chunk_text,
-                        COMPLETION_PARTIAL_PREFIXES,
-                    )
-                    if not chunk_text:
+                    sanitized = sanitizer.feed(chunk_text)
+                    if not sanitized.text:
+                        if sanitized.stop:
+                            break
                         continue
 
-                    chunk_text, should_stop = self._sanitize_completion_text(chunk_text, eos_token)
-                    if chunk_text:
-                        response_text += chunk_text
-                        yield response_text
+                    response_text += sanitized.text
+                    yield response_text
 
-                    if should_stop:
+                    if sanitized.stop:
                         break
+
+                tail = sanitizer.finalize()
+                if tail.text:
+                    response_text += tail.text
+                    yield response_text
                 return None
         except Exception as exc:
             raise_gradio_error(exc, logger=logger, action="handle completion requests")

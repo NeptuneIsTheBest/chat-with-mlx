@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import gradio as gr
+from gradio.i18n import I18nData
 
 from ..language import get_text
 from ..services.context_management import create_empty_context_summary_state, get_default_context_status
@@ -280,9 +281,18 @@ def build_app_layout(
                             {"left": "$", "right": "$", "display": False},
                         ],
                     )
+                    chat_textbox = gr.MultimodalTextbox(
+                        show_label=False,
+                        label="",
+                        placeholder=I18nData("chat_interface.message_placeholder"),
+                        scale=7,
+                        autofocus=False,
+                        file_count="multiple",
+                    )
                     gr.ChatInterface(
                         multimodal=True,
                         chatbot=chatbot,
+                        textbox=chat_textbox,
                         editable=True,
                         fn=chat_fn,
                         title=None,
