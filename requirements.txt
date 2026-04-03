@@ -1,8 +1,8 @@
 gradio >= 6.0.0
 
-mlx >= 0.28.0
-mlx-lm >= 0.26.3
-mlx-vlm >= 0.3.8
+mlx >= 0.31.1
+mlx-lm >= 0.31.1
+mlx-vlm >= 0.4.3
 
 tiktoken
 huggingface-hub
