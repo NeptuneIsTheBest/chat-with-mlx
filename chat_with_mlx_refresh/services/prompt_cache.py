@@ -20,6 +20,7 @@ def create_empty_prompt_cache_state() -> dict[str, Any]:
         "model_signature": "",
         "backend": "",
         "token_ids": [],
+        "cache_length": 0,
         "media_signature": "",
         "media_sequence": [],
         "prompt_cache": None,
@@ -31,6 +32,7 @@ def delete_prompt_cache_state(state: Any) -> None:
     if isinstance(state, dict):
         state["prompt_cache"] = None
         state["token_ids"] = []
+        state["cache_length"] = 0
         state["media_sequence"] = []
     gc.collect()
     mlx.core.clear_cache()
@@ -43,6 +45,7 @@ class PromptCachePlan:
     prompt_token_ids: list[int]
     prompt_cache: Any
     cached_prefix_len: int
+    cached_token_prefix_len: int
     media_signature: str
     media_sequence: list[tuple[tuple[str, ...], tuple[str, ...]]]
     prepared_inputs: Optional[dict[str, Any]] = None
@@ -101,6 +104,7 @@ class PromptCacheService:
             "model_signature": self._get_model_signature(model),
             "backend": plan.backend,
             "token_ids": plan.prompt_token_ids + list(generated_token_ids),
+            "cache_length": self._get_prompt_cache_length(plan.prompt_cache),
             "media_signature": plan.media_signature,
             "media_sequence": [
                 {
@@ -122,13 +126,15 @@ class PromptCacheService:
         prompt_token_ids = model.encode_prompt_tokens(prompt)
         prompt_cache = model.make_prompt_cache()
         cached_prefix_len = 0
+        cached_token_prefix_len = 0
 
         reusable_state = self._normalize_state(state)
         if self._can_reuse_text_cache(model, reusable_state, prompt_token_ids):
             cached = self._copy_prompt_cache(reusable_state.get("prompt_cache"))
             if cached is not None:
                 prompt_cache = cached
-                cached_prefix_len = len(reusable_state["token_ids"])
+                cached_token_prefix_len = len(reusable_state["token_ids"])
+                cached_prefix_len = self._get_reusable_cache_length(reusable_state)
 
         return PromptCachePlan(
             backend="text",
@@ -136,6 +142,7 @@ class PromptCacheService:
             prompt_token_ids=prompt_token_ids,
             prompt_cache=prompt_cache,
             cached_prefix_len=cached_prefix_len,
+            cached_token_prefix_len=cached_token_prefix_len,
             media_signature="",
             media_sequence=[],
         )
@@ -154,13 +161,15 @@ class PromptCacheService:
         media_signature = self._compute_media_signature(turn_media)
         prompt_cache = model.make_prompt_cache()
         cached_prefix_len = 0
+        cached_token_prefix_len = 0
 
         reusable_state = self._normalize_state(state)
         if self._can_reuse_multimodal_cache(model, reusable_state, prompt_token_ids, media_sequence):
             cached = self._copy_prompt_cache(reusable_state.get("prompt_cache"))
             if cached is not None:
                 prompt_cache = cached
-                cached_prefix_len = len(reusable_state["token_ids"])
+                cached_token_prefix_len = len(reusable_state["token_ids"])
+                cached_prefix_len = self._get_reusable_cache_length(reusable_state)
 
         return PromptCachePlan(
             backend="multimodal",
@@ -168,6 +177,7 @@ class PromptCacheService:
             prompt_token_ids=prompt_token_ids,
             prompt_cache=prompt_cache,
             cached_prefix_len=cached_prefix_len,
+            cached_token_prefix_len=cached_token_prefix_len,
             media_signature=media_signature,
             media_sequence=media_sequence,
             prepared_inputs=prepared_inputs,
@@ -203,6 +213,7 @@ class PromptCacheService:
                 "model_signature": str(state.get("model_signature") or ""),
                 "backend": str(state.get("backend") or ""),
                 "token_ids": [int(token) for token in list(state.get("token_ids") or [])],
+                "cache_length": max(0, int(state.get("cache_length") or 0)),
                 "media_signature": str(state.get("media_signature") or ""),
                 "media_sequence": self._normalize_turn_media(list(state.get("media_sequence") or [])),
                 "prompt_cache": state.get("prompt_cache"),
@@ -222,6 +233,7 @@ class PromptCacheService:
             and state.get("backend") == "text"
             and state.get("model_signature") == self._get_model_signature(model)
             and bool(state.get("prompt_cache"))
+            and self._get_reusable_cache_length(state) > 0
             and self._is_prefix(state.get("token_ids", []), prompt_token_ids)
         )
 
@@ -237,6 +249,7 @@ class PromptCacheService:
             and state.get("backend") == "multimodal"
             and state.get("model_signature") == self._get_model_signature(model)
             and bool(state.get("prompt_cache"))
+            and self._get_reusable_cache_length(state) > 0
             and self._is_prefix(list(state.get("media_sequence", [])), media_sequence)
             and self._is_prefix(state.get("token_ids", []), prompt_token_ids)
         )
@@ -267,3 +280,59 @@ class PromptCacheService:
             audios = [str(path) for path in item.get("audios", [])]
             parts.append(f"images={'|'.join(images)}\naudios={'|'.join(audios)}")
         return hashlib.sha256("\n---\n".join(parts).encode("utf-8")).hexdigest()
+
+    def _get_reusable_cache_length(self, state: dict[str, Any]) -> int:
+        stored_length = max(0, int(state.get("cache_length") or 0))
+        if stored_length > 0:
+            return stored_length
+        return self._get_prompt_cache_length(state.get("prompt_cache"))
+
+    def _get_prompt_cache_length(self, prompt_cache: Any) -> int:
+        for cache_entry in self._iter_prompt_cache_entries(prompt_cache):
+            cache_length = self._get_cache_entry_length(cache_entry)
+            if cache_length > 0:
+                return cache_length
+        return 0
+
+    def _iter_prompt_cache_entries(self, prompt_cache: Any):
+        if prompt_cache is None:
+            return
+        if isinstance(prompt_cache, (list, tuple)):
+            for item in prompt_cache:
+                yield from self._iter_prompt_cache_entries(item)
+            return
+        nested_caches = getattr(prompt_cache, "caches", None)
+        if isinstance(nested_caches, list):
+            for item in nested_caches:
+                yield from self._iter_prompt_cache_entries(item)
+            return
+        yield prompt_cache
+
+    @staticmethod
+    def _get_cache_entry_length(cache_entry: Any) -> int:
+        if cache_entry is None:
+            return 0
+
+        size_fn = getattr(cache_entry, "size", None)
+        if callable(size_fn):
+            try:
+                size_value = size_fn()
+            except Exception:
+                size_value = 0
+            if isinstance(size_value, int):
+                return max(0, size_value)
+            if hasattr(size_value, "item"):
+                try:
+                    return max(0, int(size_value.item()))
+                except Exception:
+                    pass
+
+        offset = getattr(cache_entry, "offset", None)
+        if isinstance(offset, int):
+            return max(0, offset)
+        if hasattr(offset, "item"):
+            try:
+                return max(0, int(offset.item()))
+            except Exception:
+                return 0
+        return 0

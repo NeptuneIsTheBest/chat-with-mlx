@@ -411,6 +411,7 @@ class ChatService:
                     response_args["prompt_token_ids"] = cache_plan.prompt_token_ids
                     response_args["prompt_cache"] = cache_plan.prompt_cache
                     response_args["cached_prefix_len"] = cache_plan.cached_prefix_len
+                    response_args["cached_token_prefix_len"] = cache_plan.cached_token_prefix_len
                     if cache_plan.prepared_inputs is not None:
                         response_args["prepared_inputs"] = cache_plan.prepared_inputs
 

@@ -288,6 +288,8 @@ def build_app_layout(
                         scale=7,
                         autofocus=False,
                         file_count="multiple",
+                        # Gradio 6 ignores ChatInterface stop_btn when a custom textbox is provided.
+                        stop_btn=True,
                     )
                     gr.ChatInterface(
                         multimodal=True,

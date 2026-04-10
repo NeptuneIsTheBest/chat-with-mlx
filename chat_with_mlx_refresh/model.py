@@ -23,6 +23,9 @@ from mlx_vlm.models import cache as mlx_vlm_cache
 from .model_config import ModelConfig, ModelConfigStore
 
 
+logger = logging.getLogger(__name__)
+
+
 class MessageRole(enum.Enum):
     SYSTEM = "system"
     USER = "user"
@@ -317,8 +320,9 @@ class MultimodalModel(BaseLocalModel):
     def _stream_generate_with_prepared_inputs(
         self,
         prompt_cache,
-        prepared_inputs: dict[str, Any],
-        cached_prefix_len: int,
+        prepared_generation: dict[str, Any],
+        cached_input_prefix_len: int,
+        cached_token_prefix_len: int,
         temperature: float,
         top_k: int,
         top_p: float,
@@ -330,15 +334,10 @@ class MultimodalModel(BaseLocalModel):
         quantized_kv_start: int = 5000,
         prefill_step_size: Optional[int] = DEFAULT_PREFILL_STEP_SIZE,
     ) -> Generator[Any, None, None]:
-        input_ids = prepared_inputs["input_ids"]
-        pixel_values = prepared_inputs.get("pixel_values")
-        mask = prepared_inputs.get("mask")
-        data_kwargs = {
-            key: value
-            for key, value in prepared_inputs.items()
-            if key not in {"input_ids", "pixel_values", "mask", "attention_mask"}
-        }
-        total_prompt_tokens = int(input_ids.size)
+        input_ids = prepared_generation["input_ids"]
+        inputs_embeds = prepared_generation["inputs_embeds"]
+        step_kwargs = dict(prepared_generation["step_kwargs"])
+        total_prompt_tokens = int(prepared_generation["total_prompt_tokens"])
 
         sampler = sample_utils.make_sampler(
             temp=temperature,
@@ -361,7 +360,6 @@ class MultimodalModel(BaseLocalModel):
             detokenizer = self.processor.detokenizer
             detokenizer.reset()
             tokens = mlx.core.array([], dtype=input_ids.dtype)
-            step_kwargs = {}
 
             def _step(y, inputs_embeds=None):
                 nonlocal tokens, step_kwargs
@@ -399,26 +397,16 @@ class MultimodalModel(BaseLocalModel):
 
                     return sampled, logprobs.squeeze(0)
 
+            if cached_input_prefix_len:
+                inputs_embeds = inputs_embeds[:, cached_input_prefix_len:]
+                input_ids = input_ids[:, cached_token_prefix_len:]
+                step_kwargs = self._slice_prefill_step_kwargs(
+                    step_kwargs,
+                    cached_input_prefix_len,
+                    int(prepared_generation["input_length"]),
+                )
+
             with mlx.core.stream(vlm_generation_stream):
-                embedding_output = self.model.get_input_embeddings(
-                    input_ids,
-                    pixel_values,
-                    mask=mask,
-                    **data_kwargs,
-                )
-                inputs_embeds = embedding_output.inputs_embeds
-                step_kwargs.update(
-                    {
-                        key: value
-                        for key, value in embedding_output.to_dict().items()
-                        if key != "inputs_embeds" and value is not None
-                    }
-                )
-
-                if cached_prefix_len:
-                    inputs_embeds = inputs_embeds[:, cached_prefix_len:]
-                    input_ids = input_ids[:, cached_prefix_len:]
-
                 if prefill_step_size is not None and inputs_embeds.shape[1] > prefill_step_size:
                     while inputs_embeds.shape[1] > 1:
                         n_to_process = min(prefill_step_size, inputs_embeds.shape[1] - 1)
@@ -500,6 +488,7 @@ class MultimodalModel(BaseLocalModel):
         prepared_inputs = kwargs.get("prepared_inputs")
         prompt_cache = kwargs.get("prompt_cache")
         cached_prefix_len = max(0, int(kwargs.get("cached_prefix_len") or 0))
+        cached_token_prefix_len = max(0, int(kwargs.get("cached_token_prefix_len") or 0))
         gen_args = {
             "model": self.model,
             "processor": self.processor,
@@ -516,22 +505,40 @@ class MultimodalModel(BaseLocalModel):
 
         if prepared_inputs is not None:
             if cached_prefix_len:
-                generator = self._stream_generate_with_prepared_inputs(
-                    prompt_cache=prompt_cache,
-                    prepared_inputs=prepared_inputs,
-                    cached_prefix_len=cached_prefix_len,
-                    temperature=gen_args["temperature"],
-                    top_k=gen_args["top_k"],
-                    top_p=gen_args["top_p"],
-                    min_p=gen_args["min_p"],
-                    max_tokens=gen_args["max_tokens"],
-                    repetition_penalty=gen_args["repetition_penalty"],
-                )
-                if stream:
-                    return generator
-                return "".join(chunk.text for chunk in generator)
-
-            gen_args.update(prepared_inputs)
+                prepared_generation = self._prepare_cached_generation_inputs(prepared_inputs)
+                if not self._can_reuse_cached_prefix(
+                    prepared_generation,
+                    cached_input_prefix_len=cached_prefix_len,
+                    cached_token_prefix_len=cached_token_prefix_len,
+                ):
+                    logger.warning(
+                        "Skipping multimodal prompt cache reuse because the cached prefix does not align "
+                        "with the prepared inputs (cache_len=%s, token_prefix=%s, input_len=%s, token_len=%s).",
+                        cached_prefix_len,
+                        cached_token_prefix_len,
+                        prepared_generation["input_length"],
+                        prepared_generation["token_length"],
+                    )
+                    gen_args["prompt_cache"] = self.make_prompt_cache()
+                    gen_args.update(prepared_inputs)
+                else:
+                    generator = self._stream_generate_with_prepared_inputs(
+                        prompt_cache=prompt_cache,
+                        prepared_generation=prepared_generation,
+                        cached_input_prefix_len=cached_prefix_len,
+                        cached_token_prefix_len=cached_token_prefix_len,
+                        temperature=gen_args["temperature"],
+                        top_k=gen_args["top_k"],
+                        top_p=gen_args["top_p"],
+                        min_p=gen_args["min_p"],
+                        max_tokens=gen_args["max_tokens"],
+                        repetition_penalty=gen_args["repetition_penalty"],
+                    )
+                    if stream:
+                        return generator
+                    return "".join(chunk.text for chunk in generator)
+            else:
+                gen_args.update(prepared_inputs)
         else:
             gen_args["image"] = kwargs.get("images", [])
             gen_args["audio"] = kwargs.get("audios", [])
@@ -539,6 +546,101 @@ class MultimodalModel(BaseLocalModel):
         if stream:
             return mlx_vlm.stream_generate(**gen_args)
         return mlx_vlm.generate(**gen_args).text
+
+    def _prepare_cached_generation_inputs(self, prepared_inputs: dict[str, Any]) -> dict[str, Any]:
+        input_ids = prepared_inputs["input_ids"]
+        pixel_values = prepared_inputs.get("pixel_values")
+        mask = prepared_inputs.get("mask")
+        data_kwargs = {
+            key: value
+            for key, value in prepared_inputs.items()
+            if key not in {"input_ids", "pixel_values", "mask", "attention_mask"}
+        }
+        embedding_output = self.model.get_input_embeddings(
+            input_ids,
+            pixel_values,
+            mask=mask,
+            **data_kwargs,
+        )
+        step_kwargs = {
+            key: value
+            for key, value in embedding_output.to_dict().items()
+            if key != "inputs_embeds" and value is not None
+        }
+        return {
+            "input_ids": input_ids,
+            "inputs_embeds": embedding_output.inputs_embeds,
+            "step_kwargs": step_kwargs,
+            "input_length": int(embedding_output.inputs_embeds.shape[1]),
+            "token_length": int(input_ids.shape[1]),
+            "total_prompt_tokens": int(input_ids.size),
+        }
+
+    @staticmethod
+    def _can_reuse_cached_prefix(
+        prepared_generation: dict[str, Any],
+        *,
+        cached_input_prefix_len: int,
+        cached_token_prefix_len: int,
+    ) -> bool:
+        input_length = int(prepared_generation["input_length"])
+        token_length = int(prepared_generation["token_length"])
+        return (
+            cached_input_prefix_len > 0
+            and cached_token_prefix_len > 0
+            and cached_input_prefix_len < input_length
+            and cached_token_prefix_len < token_length
+        )
+
+    def _slice_prefill_step_kwargs(
+        self,
+        step_kwargs: dict[str, Any],
+        cached_input_prefix_len: int,
+        input_length: int,
+    ) -> dict[str, Any]:
+        sequence_axes = {
+            "attention_mask_4d": (2,),
+            "cross_attention_mask": (2,),
+            "full_text_row_masked_out_mask": (2,),
+            "visual_pos_masks": (1,),
+            "per_layer_inputs": (1,),
+            "decoder_inputs_embeds": (1,),
+            "attention_mask": (1,),
+        }
+        sliced_kwargs = dict(step_kwargs)
+        for key, axes in sequence_axes.items():
+            value = sliced_kwargs.get(key)
+            if value is None:
+                continue
+            for axis in axes:
+                value = self._slice_tensor_if_matches_length(
+                    value,
+                    axis=axis,
+                    start=cached_input_prefix_len,
+                    expected_length=input_length,
+                )
+            sliced_kwargs[key] = value
+        return sliced_kwargs
+
+    @staticmethod
+    def _slice_tensor_if_matches_length(
+        value: Any,
+        *,
+        axis: int,
+        start: int,
+        expected_length: int,
+    ) -> Any:
+        if value is None or not hasattr(value, "shape"):
+            return value
+        ndim = len(value.shape)
+        normalized_axis = axis if axis >= 0 else ndim + axis
+        if normalized_axis < 0 or normalized_axis >= ndim:
+            return value
+        if int(value.shape[normalized_axis]) != expected_length:
+            return value
+        slices = [slice(None)] * ndim
+        slices[normalized_axis] = slice(start, None)
+        return value[tuple(slices)]
 
     def get_multimodal_abilities(self) -> list[str]:
         return list(self.multimodal_ability)
