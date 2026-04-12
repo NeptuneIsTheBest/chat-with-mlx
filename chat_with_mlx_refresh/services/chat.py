@@ -88,6 +88,41 @@ class ChatService:
         return model
 
     @staticmethod
+    def _normalize_incoming_message(message: Any) -> dict[str, Any]:
+        if isinstance(message, dict):
+            normalized_message = dict(message)
+            text = normalized_message.get("text", "")
+            files = normalized_message.get("files", [])
+        elif isinstance(message, str):
+            normalized_message = {}
+            text = message
+            files = []
+        elif message is None:
+            normalized_message = {}
+            text = ""
+            files = []
+        else:
+            normalized_message = {}
+            text = str(message)
+            files = []
+
+        if not isinstance(text, str):
+            text = str(text) if text is not None else ""
+
+        if isinstance(files, list):
+            normalized_files = files
+        elif isinstance(files, Sequence) and not isinstance(files, (str, bytes, bytearray)):
+            normalized_files = list(files)
+        elif files:
+            normalized_files = [files]
+        else:
+            normalized_files = []
+
+        normalized_message["text"] = text
+        normalized_message["files"] = normalized_files
+        return normalized_message
+
+    @staticmethod
     def _normalize_file_path(file_entry: Any) -> Optional[str]:
         if isinstance(file_entry, str):
             return file_entry
@@ -340,7 +375,7 @@ class ChatService:
 
     def handle_chat(
         self,
-        message: dict[str, Any],
+        message: Any,
         history: list[dict[str, Any]],
         system_prompt: Optional[str] = None,
         temperature: float = 1.0,
@@ -358,6 +393,7 @@ class ChatService:
         stream: bool = True,
     ) -> Iterator[Any]:
         try:
+            message = self._normalize_incoming_message(message)
             message = self._apply_rag_if_needed(message, rag_enabled, rag_n_results)
             with self.model_manager.reserve_loaded_model() as model:
                 ensure_model_has_chat_template(model)
@@ -455,7 +491,7 @@ class ChatService:
 
     async def managed_chat_generator(
         self,
-        message: dict[str, Any],
+        message: Any,
         history: list[dict[str, Any]],
         system_prompt: Optional[str] = None,
         temperature: float = 1.0,
