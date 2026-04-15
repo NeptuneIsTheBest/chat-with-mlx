@@ -29,7 +29,7 @@ def bind_events(
         inputs=[ui.chat.system_prompt],
     ).then(
         fn=chat_service.reset_chat_state,
-        inputs=[ui.chat.auto_manage_context],
+        inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
         outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
     ui.chat.system_prompt.change(
@@ -37,19 +37,19 @@ def bind_events(
         inputs=[ui.chat.system_prompt],
     ).then(
         fn=chat_service.reset_chat_state,
-        inputs=[ui.chat.auto_manage_context],
+        inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
         outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
     ui.chat.auto_manage_context.change(
         fn=chat_service.reset_chat_state,
-        inputs=[ui.chat.auto_manage_context],
+        inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
         outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
     ui.chat.chatbot.clear(
         fn=runtime_service.clear_cache,
     ).then(
         fn=chat_service.reset_chat_state,
-        inputs=[ui.chat.auto_manage_context],
+        inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
         outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
 
@@ -91,7 +91,7 @@ def bind_events(
         outputs=[ui.completion.params["max_tokens"]],
     ).then(
         fn=chat_service.reset_chat_state,
-        inputs=[ui.chat.auto_manage_context],
+        inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
         outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
 
@@ -122,7 +122,7 @@ def bind_events(
         outputs=[ui.completion.params["max_tokens"]],
     ).then(
         fn=chat_service.reset_chat_state,
-        inputs=[ui.chat.auto_manage_context],
+        inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
         outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
 
@@ -138,7 +138,16 @@ def bind_events(
             ui.model_management.form["model_name"],
             ui.model_management.form["mlx_repo"],
             ui.model_management.form["quantize"],
+            ui.model_management.form["kv_cache_backend"],
+            ui.model_management.form["turboquant_bits"],
         ],
+    ).then(
+        fn=model_management_service.update_turboquant_ui_state,
+        inputs=[
+            ui.model_management.form["kv_cache_backend"],
+            ui.model_management.form["turboquant_bits"],
+        ],
+        outputs=[ui.model_management.form["turboquant_bits"]],
     ).then(
         fn=model_management_service.update_multimodal_ui_state,
         inputs=[
@@ -175,12 +184,22 @@ def bind_events(
             ui.model_management.form["detected_capabilities"],
         ],
     )
+    ui.model_management.form["kv_cache_backend"].change(
+        fn=model_management_service.update_turboquant_ui_state,
+        inputs=[
+            ui.model_management.form["kv_cache_backend"],
+            ui.model_management.form["turboquant_bits"],
+        ],
+        outputs=[ui.model_management.form["turboquant_bits"]],
+    )
     ui.model_management.form["add_button"].click(
         fn=model_management_service.add_model,
         inputs=[
             ui.model_management.form["model_name"],
             ui.model_management.form["mlx_repo"],
             ui.model_management.form["quantize"],
+            ui.model_management.form["kv_cache_backend"],
+            ui.model_management.form["turboquant_bits"],
             ui.model_management.form["default_language"],
             ui.model_management.form["system_prompt"],
             ui.model_management.form["multimodal_mode"],
@@ -238,7 +257,7 @@ def bind_events(
         outputs=[ui.completion.params["max_tokens"]],
     ).then(
         fn=chat_service.reset_chat_state,
-        inputs=[ui.chat.auto_manage_context],
+        inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
         outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )
 
@@ -299,6 +318,6 @@ def bind_events(
         outputs=[ui.chat.rag_form["rag_status"]],
     ).then(
         fn=chat_service.reset_chat_state,
-        inputs=[ui.chat.auto_manage_context],
+        inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
         outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
     )

@@ -5,7 +5,7 @@ import gradio as gr
 from ..language import get_text
 from ..services.context_management import create_empty_context_summary_state, get_default_context_status
 from ..services.model_management import ModelManagementService
-from ..services.prompt_cache import create_empty_prompt_cache_state, delete_prompt_cache_state
+from ..services.prompt_cache import create_empty_prompt_cache_state
 from ..services.rag import RAGService
 from ..services.runtime import RuntimeService
 from .components import AppUI, ChatUI, CompletionUI, ModelManagementUI, create_generation_params, create_model_controls, create_rag_params, create_textbox
@@ -59,7 +59,7 @@ def build_app_layout(
         chat_context_summary_state = gr.State(value=create_empty_context_summary_state())
         chat_prompt_cache_state = gr.State(
             value=create_empty_prompt_cache_state(),
-            delete_callback=delete_prompt_cache_state,
+            delete_callback=runtime_service.release_prompt_cache_state,
         )
         chat_rag_form = {
             "rag_enabled": gr.Checkbox(
@@ -138,6 +138,21 @@ def build_app_layout(
                 value="None",
                 interactive=True,
                 render=False,
+            ),
+            "kv_cache_backend": gr.Dropdown(
+                label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.kv_cache_backend.label"),
+                choices=model_management_service.get_kv_cache_backend_choices(),
+                value=ModelManagementService.KV_CACHE_BACKEND_DEFAULT,
+                interactive=True,
+                render=False,
+            ),
+            "turboquant_bits": gr.Dropdown(
+                label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.turboquant_bits.label"),
+                choices=model_management_service.get_turboquant_bits_choices(),
+                value=4,
+                interactive=True,
+                render=False,
+                visible=False,
             ),
             "default_language": gr.Dropdown(
                 label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.default_language.label"),
@@ -353,6 +368,8 @@ def build_app_layout(
                     local_model_form["model_name"].render()
                     local_model_form["mlx_repo"].render()
                     local_model_form["quantize"].render()
+                    local_model_form["kv_cache_backend"].render()
+                    local_model_form["turboquant_bits"].render()
                     local_model_form["default_language"].render()
                     local_model_form["system_prompt"].render()
                     local_model_form["multimodal_mode"].render()

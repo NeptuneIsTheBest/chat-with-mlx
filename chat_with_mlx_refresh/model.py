@@ -21,6 +21,12 @@ from mlx_vlm.generate import DEFAULT_PREFILL_STEP_SIZE, generation_stream as vlm
 from mlx_vlm.models import cache as mlx_vlm_cache
 
 from .model_config import ModelConfig, ModelConfigStore
+from .services.prompt_cache import (
+    PromptCachePlan,
+    PromptCacheRegistry,
+    normalize_prompt_cache_state as normalize_prompt_cache_state_descriptor,
+)
+from .turboquant import TurboQuantAdapter
 
 
 logger = logging.getLogger(__name__)
@@ -86,8 +92,9 @@ def get_model_max_length(model, tokenizer=None, config=None) -> int:
 
 
 class BaseLocalModel(ABC):
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, model_config: Optional[ModelConfig] = None):
         self.model_path = model_path
+        self.model_config = model_config
         self.load()
 
     @abstractmethod
@@ -135,11 +142,11 @@ class BaseLocalModel(ABC):
 
 
 class TextModel(BaseLocalModel):
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, model_config: Optional[ModelConfig] = None):
         self.model = None
         self.tokenizer = None
         self.max_position_embeddings = None
-        super().__init__(model_path)
+        super().__init__(model_path, model_config=model_config)
 
     def load(self) -> None:
         try:
@@ -170,7 +177,8 @@ class TextModel(BaseLocalModel):
         return list(tokens)
 
     def make_prompt_cache(self):
-        return mlx_lm_cache.make_prompt_cache(self.model)
+        prompt_cache = mlx_lm_cache.make_prompt_cache(self.model)
+        return TurboQuantAdapter.build_text_prompt_cache(self.model, self.model_config, prompt_cache)
 
     def perform_generation(
         self,
@@ -208,6 +216,8 @@ class TextModel(BaseLocalModel):
         prompt_token_ids = kwargs.get("prompt_token_ids")
         prompt_cache = kwargs.get("prompt_cache")
         cached_prefix_len = max(0, int(kwargs.get("cached_prefix_len") or 0))
+        if prompt_cache is None and TurboQuantAdapter.is_enabled(self.model_config):
+            prompt_cache = self.make_prompt_cache()
         if prompt_token_ids is not None:
             prompt_tokens = list(prompt_token_ids)
             if cached_prefix_len:
@@ -227,13 +237,13 @@ class TextModel(BaseLocalModel):
 
 
 class MultimodalModel(BaseLocalModel):
-    def __init__(self, model_path: str):
+    def __init__(self, model_path: str, model_config: Optional[ModelConfig] = None):
         self.config = None
         self.model = None
         self.processor = None
         self.max_position_embeddings = None
         self.multimodal_ability: list[str] = []
-        super().__init__(model_path)
+        super().__init__(model_path, model_config=model_config)
 
     def load(self) -> None:
         try:
@@ -677,6 +687,7 @@ class ModelManager:
         self.model: Optional[BaseLocalModel] = None
         self.model_config: Optional[ModelConfig] = None
         self.model_configs: dict[str, ModelConfig] = self.config_store.load_configs()
+        self.prompt_cache_registry = PromptCacheRegistry()
         self.memory_usage_level = MemoryUsageLevel.STRICT
         self.active_generator: list[Any] = []
         self._model_lock = threading.RLock()
@@ -735,6 +746,8 @@ class ModelManager:
                 if not model_config:
                     raise RuntimeError(f"Model '{model_name}' not found")
 
+                self.clear_chat_caches()
+
                 try:
                     loaded_model = self._load_local_model(model_config)
                     with self._model_condition:
@@ -787,13 +800,13 @@ class ModelManager:
     def _instantiate_local_model(self, model_config: ModelConfig, local_model_path: Path) -> BaseLocalModel:
         if model_config.multimodal_ability:
             try:
-                return MultimodalModel(str(local_model_path))
+                return MultimodalModel(str(local_model_path), model_config=model_config)
             except Exception as exc:
                 raise RuntimeError(
                     f"Failed to load '{model_config.resolved_display_name}' as a multimodal model: {exc}. "
                     "If this repository is not actually compatible with mlx-vlm, re-add it in Text only mode."
                 ) from exc
-        return TextModel(str(local_model_path))
+        return TextModel(str(local_model_path), model_config=model_config)
 
     def _download_model(self, model_config: ModelConfig, local_model_path: Path) -> None:
         partial_model_path = self._get_partial_model_path(local_model_path)
@@ -898,6 +911,7 @@ class ModelManager:
 
         if model:
             self._run_cleanup_step(cleanup_warnings, "close the active model", model.close)
+        self._run_cleanup_step(cleanup_warnings, "release cached chat prompt state", self.clear_chat_caches)
         self._run_cleanup_step(cleanup_warnings, "run garbage collection after closing the model", gc.collect)
         self._run_cleanup_step(cleanup_warnings, "clear the MLX cache after closing the model", mlx.core.clear_cache)
         return cleanup_warnings
@@ -1015,9 +1029,6 @@ class ModelManager:
             generators = list(self.active_generator)
 
         cleanup_warnings: list[str] = []
-        if not generators:
-            return cleanup_warnings
-
         successfully_closed = []
         for generator in generators:
             try:
@@ -1042,6 +1053,11 @@ class ModelManager:
         if clear_runtime_cache:
             self._run_cleanup_step(
                 cleanup_warnings,
+                "release cached chat prompt state after closing active generators",
+                self.clear_chat_caches,
+            )
+            self._run_cleanup_step(
+                cleanup_warnings,
                 "run garbage collection after closing active generators",
                 gc.collect,
             )
@@ -1051,3 +1067,39 @@ class ModelManager:
                 mlx.core.clear_cache,
             )
         return cleanup_warnings
+
+    def prepare_chat_generation(
+        self,
+        model: BaseLocalModel,
+        prompt: str,
+        turn_media: list[dict[str, list[str]]],
+        state: Optional[dict[str, Any]],
+    ) -> Optional[PromptCachePlan]:
+        return self.prompt_cache_registry.prepare_chat_generation(
+            model=model,
+            prompt=prompt,
+            turn_media=turn_media,
+            state=state,
+        )
+
+    def commit_chat_generation(
+        self,
+        model: BaseLocalModel,
+        plan: Optional[PromptCachePlan],
+        generated_token_ids: list[int],
+    ) -> dict[str, Any]:
+        return self.prompt_cache_registry.commit_chat_generation(
+            model=model,
+            plan=plan,
+            generated_token_ids=generated_token_ids,
+        )
+
+    def release_chat_cache_session(self, state_or_session_id: Any) -> None:
+        self.prompt_cache_registry.release_chat_cache_session(state_or_session_id)
+
+    def clear_chat_caches(self) -> None:
+        self.prompt_cache_registry.clear_chat_caches()
+
+    @staticmethod
+    def normalize_prompt_cache_state(state: Any) -> dict[str, Any]:
+        return normalize_prompt_cache_state_descriptor(state)

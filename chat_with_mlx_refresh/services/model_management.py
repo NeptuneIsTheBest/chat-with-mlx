@@ -21,6 +21,8 @@ class ModelManagementService:
     CAPABILITY_MODE_TEXT_ONLY = ModelConfigStore.CAPABILITY_MODE_TEXT_ONLY
     CAPABILITY_MODE_AUTO_DETECT = ModelConfigStore.CAPABILITY_MODE_AUTO_DETECT
     CAPABILITY_MODE_MANUAL_OVERRIDE = ModelConfigStore.CAPABILITY_MODE_MANUAL_OVERRIDE
+    KV_CACHE_BACKEND_DEFAULT = ModelConfigStore.KV_CACHE_BACKEND_DEFAULT
+    KV_CACHE_BACKEND_TURBOQUANT = ModelConfigStore.KV_CACHE_BACKEND_TURBOQUANT
 
     def __init__(self, model_manager: ModelManager) -> None:
         self.model_manager = model_manager
@@ -35,6 +37,16 @@ class ModelManagementService:
             self.CAPABILITY_MODE_MANUAL_OVERRIDE,
         ]
 
+    def get_kv_cache_backend_choices(self) -> list[str]:
+        return [
+            self.KV_CACHE_BACKEND_DEFAULT,
+            self.KV_CACHE_BACKEND_TURBOQUANT,
+        ]
+
+    @staticmethod
+    def get_turboquant_bits_choices() -> list[int]:
+        return sorted(ModelConfigStore.VALID_TURBOQUANT_BITS)
+
     @staticmethod
     def _is_valid_repo(mlx_repo: str) -> bool:
         normalized_repo = (mlx_repo or "").strip()
@@ -44,6 +56,17 @@ class ModelManagementService:
         if multimodal_mode in self.get_capability_mode_choices():
             return multimodal_mode
         return self.CAPABILITY_MODE_TEXT_ONLY
+
+    def _normalize_kv_cache_backend(self, kv_cache_backend: Optional[str]) -> str:
+        normalized = ModelConfigStore.normalize_kv_cache_backend(kv_cache_backend)
+        if normalized in self.get_kv_cache_backend_choices():
+            return normalized
+        return self.KV_CACHE_BACKEND_DEFAULT
+
+    @staticmethod
+    def _normalize_turboquant_bits(turboquant_bits: Optional[int]) -> int:
+        normalized = ModelConfigStore.normalize_turboquant_bits(turboquant_bits)
+        return normalized if normalized is not None else 4
 
     @gradio_error_boundary("search HuggingFace models", logger)
     def search_huggingface_models(self, query: str) -> DataFrame:
@@ -137,10 +160,10 @@ class ModelManagementService:
             data_frame, evt = evt, data_frame
 
         if evt is None or not isinstance(data_frame, DataFrame):
-            return gr.update(), gr.update(), gr.update()
+            return gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
 
         if evt.index[0] < 0 or evt.index[0] >= len(data_frame):
-            return gr.update(), gr.update(), gr.update()
+            return gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
 
         model_id = str(data_frame.iloc[evt.index[0], 0])
         model_name = model_id.split("/")[-1]
@@ -164,7 +187,22 @@ class ModelManagementService:
         elif "bf32" in lower_name:
             quantize = "bf32"
 
-        return model_name, model_id, quantize
+        kv_cache_backend = self.KV_CACHE_BACKEND_TURBOQUANT if "optiq" in lower_name else self.KV_CACHE_BACKEND_DEFAULT
+        turboquant_bits = 4
+
+        return model_name, model_id, quantize, kv_cache_backend, turboquant_bits
+
+    def update_turboquant_ui_state(
+        self,
+        kv_cache_backend: Optional[str],
+        turboquant_bits: Optional[int],
+    ):
+        normalized_backend = self._normalize_kv_cache_backend(kv_cache_backend)
+        normalized_bits = self._normalize_turboquant_bits(turboquant_bits)
+        return gr.update(
+            visible=normalized_backend == self.KV_CACHE_BACKEND_TURBOQUANT,
+            value=normalized_bits,
+        )
 
     def update_model_management_models_list(self) -> DataFrame:
         return DataFrame({get_text("Page.ModelManagement.Dataframe.model_list.headers"): self.get_model_list()})
@@ -189,6 +227,8 @@ class ModelManagementService:
         model_name: Optional[str],
         mlx_repo: str,
         quantize: str,
+        kv_cache_backend: Optional[str],
+        turboquant_bits: Optional[int],
         default_language: str,
         default_system_prompt: Optional[str],
         multimodal_mode: Optional[str],
@@ -198,6 +238,8 @@ class ModelManagementService:
             mlx_repo=mlx_repo,
             model_name=model_name,
             quantize=quantize,
+            kv_cache_backend=self._normalize_kv_cache_backend(kv_cache_backend),
+            turboquant_bits=self._normalize_turboquant_bits(turboquant_bits),
             default_language=default_language,
             system_prompt=default_system_prompt,
             multimodal_mode=self._normalize_capability_mode(multimodal_mode),

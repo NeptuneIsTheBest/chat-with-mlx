@@ -4,42 +4,66 @@ import copy
 import gc
 import hashlib
 import logging
-from dataclasses import dataclass
+import threading
+import uuid
+from dataclasses import dataclass, field
 from typing import Any, Optional
 
 import mlx
 
-from ..model import BaseLocalModel, MultimodalModel, TextModel
-
 
 logger = logging.getLogger(__name__)
 
+PROMPT_CACHE_STATE_EMPTY = "empty"
+PROMPT_CACHE_STATE_READY = "ready"
+VALID_PROMPT_CACHE_STATES = frozenset({PROMPT_CACHE_STATE_EMPTY, PROMPT_CACHE_STATE_READY})
 
-def create_empty_prompt_cache_state() -> dict[str, Any]:
+
+def create_prompt_cache_state(
+    cache_session_id: str = "",
+    status: str = PROMPT_CACHE_STATE_EMPTY,
+) -> dict[str, Any]:
+    normalized_status = status if status in VALID_PROMPT_CACHE_STATES else PROMPT_CACHE_STATE_EMPTY
+    normalized_session_id = str(cache_session_id or "")
+    if not normalized_session_id and normalized_status == PROMPT_CACHE_STATE_READY:
+        normalized_status = PROMPT_CACHE_STATE_EMPTY
     return {
-        "model_signature": "",
-        "backend": "",
-        "token_ids": [],
-        "cache_length": 0,
-        "media_signature": "",
-        "media_sequence": [],
-        "prompt_cache": None,
-        "status": "invalid",
+        "cache_session_id": normalized_session_id,
+        "status": normalized_status,
     }
 
 
-def delete_prompt_cache_state(state: Any) -> None:
-    if isinstance(state, dict):
-        state["prompt_cache"] = None
-        state["token_ids"] = []
-        state["cache_length"] = 0
-        state["media_sequence"] = []
-    gc.collect()
-    mlx.core.clear_cache()
+def create_empty_prompt_cache_state() -> dict[str, Any]:
+    return create_prompt_cache_state()
+
+
+def normalize_prompt_cache_state(state: Any) -> dict[str, Any]:
+    if not isinstance(state, dict):
+        return create_empty_prompt_cache_state()
+    return create_prompt_cache_state(
+        cache_session_id=str(state.get("cache_session_id") or ""),
+        status=str(state.get("status") or PROMPT_CACHE_STATE_EMPTY),
+    )
+
+
+def get_prompt_cache_session_id(state: Any) -> str:
+    return normalize_prompt_cache_state(state).get("cache_session_id", "")
+
+
+@dataclass(slots=True)
+class PromptCacheEntry:
+    model_signature: str
+    backend: str
+    token_ids: list[int]
+    cache_length: int
+    media_signature: str
+    media_sequence: list[tuple[tuple[str, ...], tuple[str, ...]]] = field(default_factory=list)
+    prompt_cache: Any = None
 
 
 @dataclass(slots=True)
 class PromptCachePlan:
+    cache_session_id: str
     backend: str
     prompt: str
     prompt_token_ids: list[int]
@@ -74,69 +98,61 @@ class PromptTokenRecorder:
         self.token_ids.append(int(token))
 
 
-class PromptCacheService:
-    def reset_state(self) -> dict[str, Any]:
-        return create_empty_prompt_cache_state()
-
+class PromptCachePlanner:
     def prepare_chat_generation(
         self,
-        model: BaseLocalModel,
+        model: Any,
         prompt: str,
         turn_media: list[dict[str, list[str]]],
-        state: Optional[dict[str, Any]],
+        cache_session_id: str,
+        entry: Optional[PromptCacheEntry],
     ) -> Optional[PromptCachePlan]:
-        if isinstance(model, TextModel):
-            return self._prepare_text_generation(model, prompt, state)
-        if isinstance(model, MultimodalModel):
-            return self._prepare_multimodal_generation(model, prompt, turn_media, state)
+        if self._is_multimodal_model(model):
+            return self._prepare_multimodal_generation(model, prompt, turn_media, cache_session_id, entry)
+        if self._is_text_model(model):
+            return self._prepare_text_generation(model, prompt, cache_session_id, entry)
         return None
 
-    def build_success_state(
+    def build_cache_entry(
         self,
-        model: BaseLocalModel,
+        model: Any,
         plan: Optional[PromptCachePlan],
         generated_token_ids: list[int],
-    ) -> dict[str, Any]:
+    ) -> Optional[PromptCacheEntry]:
         if plan is None:
-            return create_empty_prompt_cache_state()
+            return None
 
-        return {
-            "model_signature": self._get_model_signature(model),
-            "backend": plan.backend,
-            "token_ids": plan.prompt_token_ids + list(generated_token_ids),
-            "cache_length": self._get_prompt_cache_length(plan.prompt_cache),
-            "media_signature": plan.media_signature,
-            "media_sequence": [
-                {
-                    "images": list(images),
-                    "audios": list(audios),
-                }
-                for images, audios in plan.media_sequence
-            ],
-            "prompt_cache": plan.prompt_cache,
-            "status": "ready",
-        }
+        return PromptCacheEntry(
+            model_signature=self._get_model_signature(model),
+            backend=plan.backend,
+            token_ids=plan.prompt_token_ids + list(generated_token_ids),
+            cache_length=self._get_prompt_cache_length(plan.prompt_cache),
+            media_signature=plan.media_signature,
+            media_sequence=list(plan.media_sequence),
+            prompt_cache=plan.prompt_cache,
+        )
 
     def _prepare_text_generation(
         self,
-        model: TextModel,
+        model: Any,
         prompt: str,
-        state: Optional[dict[str, Any]],
+        cache_session_id: str,
+        entry: Optional[PromptCacheEntry],
     ) -> PromptCachePlan:
-        prompt_token_ids = model.encode_prompt_tokens(prompt)
+        prompt_token_ids = list(model.encode_prompt_tokens(prompt))
         prompt_cache = model.make_prompt_cache()
         cached_prefix_len = 0
         cached_token_prefix_len = 0
 
-        reusable_state = self._normalize_state(state)
-        if self._can_reuse_text_cache(model, reusable_state, prompt_token_ids):
-            cached = self._copy_prompt_cache(reusable_state.get("prompt_cache"))
+        if self._can_reuse_text_cache(model, entry, prompt_token_ids):
+            cached = self._copy_prompt_cache(entry.prompt_cache)
             if cached is not None:
                 prompt_cache = cached
-                cached_token_prefix_len = len(reusable_state["token_ids"])
-                cached_prefix_len = self._get_reusable_cache_length(reusable_state)
+                cached_token_prefix_len = len(entry.token_ids)
+                cached_prefix_len = self._get_reusable_cache_length(entry)
 
         return PromptCachePlan(
+            cache_session_id=cache_session_id,
             backend="text",
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
@@ -149,29 +165,30 @@ class PromptCacheService:
 
     def _prepare_multimodal_generation(
         self,
-        model: MultimodalModel,
+        model: Any,
         prompt: str,
         turn_media: list[dict[str, list[str]]],
-        state: Optional[dict[str, Any]],
+        cache_session_id: str,
+        entry: Optional[PromptCacheEntry],
     ) -> PromptCachePlan:
         images, audios = self._flatten_turn_media(turn_media)
         prepared_inputs = model.prepare_prompt_inputs(prompt, images=images, audios=audios)
-        prompt_token_ids = model.extract_prompt_token_ids(prepared_inputs)
+        prompt_token_ids = list(model.extract_prompt_token_ids(prepared_inputs))
         media_sequence = self._normalize_turn_media(turn_media)
         media_signature = self._compute_media_signature(turn_media)
         prompt_cache = model.make_prompt_cache()
         cached_prefix_len = 0
         cached_token_prefix_len = 0
 
-        reusable_state = self._normalize_state(state)
-        if self._can_reuse_multimodal_cache(model, reusable_state, prompt_token_ids, media_sequence):
-            cached = self._copy_prompt_cache(reusable_state.get("prompt_cache"))
+        if self._can_reuse_multimodal_cache(model, entry, prompt_token_ids, media_sequence):
+            cached = self._copy_prompt_cache(entry.prompt_cache)
             if cached is not None:
                 prompt_cache = cached
-                cached_token_prefix_len = len(reusable_state["token_ids"])
-                cached_prefix_len = self._get_reusable_cache_length(reusable_state)
+                cached_token_prefix_len = len(entry.token_ids)
+                cached_prefix_len = self._get_reusable_cache_length(entry)
 
         return PromptCachePlan(
+            cache_session_id=cache_session_id,
             backend="multimodal",
             prompt=prompt,
             prompt_token_ids=prompt_token_ids,
@@ -181,6 +198,16 @@ class PromptCacheService:
             media_signature=media_signature,
             media_sequence=media_sequence,
             prepared_inputs=prepared_inputs,
+        )
+
+    @staticmethod
+    def _is_text_model(model: Any) -> bool:
+        return callable(getattr(model, "encode_prompt_tokens", None))
+
+    @staticmethod
+    def _is_multimodal_model(model: Any) -> bool:
+        return callable(getattr(model, "prepare_prompt_inputs", None)) and callable(
+            getattr(model, "extract_prompt_token_ids", None)
         )
 
     @staticmethod
@@ -203,59 +230,40 @@ class PromptCacheService:
             normalized.append((images, audios))
         return normalized
 
-    def _normalize_state(self, state: Optional[dict[str, Any]]) -> dict[str, Any]:
-        normalized = create_empty_prompt_cache_state()
-        if not isinstance(state, dict):
-            return normalized
-
-        normalized.update(
-            {
-                "model_signature": str(state.get("model_signature") or ""),
-                "backend": str(state.get("backend") or ""),
-                "token_ids": [int(token) for token in list(state.get("token_ids") or [])],
-                "cache_length": max(0, int(state.get("cache_length") or 0)),
-                "media_signature": str(state.get("media_signature") or ""),
-                "media_sequence": self._normalize_turn_media(list(state.get("media_sequence") or [])),
-                "prompt_cache": state.get("prompt_cache"),
-                "status": str(state.get("status") or "invalid"),
-            }
-        )
-        return normalized
-
     def _can_reuse_text_cache(
         self,
-        model: TextModel,
-        state: dict[str, Any],
+        model: Any,
+        entry: Optional[PromptCacheEntry],
         prompt_token_ids: list[int],
     ) -> bool:
         return (
-            state.get("status") == "ready"
-            and state.get("backend") == "text"
-            and state.get("model_signature") == self._get_model_signature(model)
-            and bool(state.get("prompt_cache"))
-            and self._get_reusable_cache_length(state) > 0
-            and self._is_prefix(state.get("token_ids", []), prompt_token_ids)
+            entry is not None
+            and entry.backend == "text"
+            and entry.model_signature == self._get_model_signature(model)
+            and bool(entry.prompt_cache)
+            and self._get_reusable_cache_length(entry) > 0
+            and self._is_prefix(entry.token_ids, prompt_token_ids)
         )
 
     def _can_reuse_multimodal_cache(
         self,
-        model: MultimodalModel,
-        state: dict[str, Any],
+        model: Any,
+        entry: Optional[PromptCacheEntry],
         prompt_token_ids: list[int],
         media_sequence: list[tuple[tuple[str, ...], tuple[str, ...]]],
     ) -> bool:
         return (
-            state.get("status") == "ready"
-            and state.get("backend") == "multimodal"
-            and state.get("model_signature") == self._get_model_signature(model)
-            and bool(state.get("prompt_cache"))
-            and self._get_reusable_cache_length(state) > 0
-            and self._is_prefix(list(state.get("media_sequence", [])), media_sequence)
-            and self._is_prefix(state.get("token_ids", []), prompt_token_ids)
+            entry is not None
+            and entry.backend == "multimodal"
+            and entry.model_signature == self._get_model_signature(model)
+            and bool(entry.prompt_cache)
+            and self._get_reusable_cache_length(entry) > 0
+            and self._is_prefix(entry.media_sequence, media_sequence)
+            and self._is_prefix(entry.token_ids, prompt_token_ids)
         )
 
     @staticmethod
-    def _is_prefix(prefix: list[int], values: list[int]) -> bool:
+    def _is_prefix(prefix: list[Any], values: list[Any]) -> bool:
         return bool(prefix) and len(prefix) < len(values) and values[: len(prefix)] == prefix
 
     @staticmethod
@@ -269,7 +277,7 @@ class PromptCacheService:
             return None
 
     @staticmethod
-    def _get_model_signature(model: BaseLocalModel) -> str:
+    def _get_model_signature(model: Any) -> str:
         return f"{type(model).__name__}:{getattr(model, 'model_path', '')}"
 
     @staticmethod
@@ -281,11 +289,10 @@ class PromptCacheService:
             parts.append(f"images={'|'.join(images)}\naudios={'|'.join(audios)}")
         return hashlib.sha256("\n---\n".join(parts).encode("utf-8")).hexdigest()
 
-    def _get_reusable_cache_length(self, state: dict[str, Any]) -> int:
-        stored_length = max(0, int(state.get("cache_length") or 0))
-        if stored_length > 0:
-            return stored_length
-        return self._get_prompt_cache_length(state.get("prompt_cache"))
+    def _get_reusable_cache_length(self, entry: PromptCacheEntry) -> int:
+        if entry.cache_length > 0:
+            return max(0, int(entry.cache_length))
+        return self._get_prompt_cache_length(entry.prompt_cache)
 
     def _get_prompt_cache_length(self, prompt_cache: Any) -> int:
         for cache_entry in self._iter_prompt_cache_entries(prompt_cache):
@@ -336,3 +343,93 @@ class PromptCacheService:
             except Exception:
                 return 0
         return 0
+
+
+class PromptCacheRegistry:
+    def __init__(self, planner: Optional[PromptCachePlanner] = None) -> None:
+        self._planner = planner or PromptCachePlanner()
+        self._entries: dict[str, PromptCacheEntry] = {}
+        self._lock = threading.RLock()
+
+    @staticmethod
+    def normalize_state(state: Any) -> dict[str, Any]:
+        return normalize_prompt_cache_state(state)
+
+    def prepare_chat_generation(
+        self,
+        model: Any,
+        prompt: str,
+        turn_media: list[dict[str, list[str]]],
+        state: Any,
+    ) -> Optional[PromptCachePlan]:
+        normalized_state = normalize_prompt_cache_state(state)
+        cache_session_id = normalized_state["cache_session_id"] or uuid.uuid4().hex
+        with self._lock:
+            entry = self._entries.get(cache_session_id)
+        return self._planner.prepare_chat_generation(
+            model=model,
+            prompt=prompt,
+            turn_media=turn_media,
+            cache_session_id=cache_session_id,
+            entry=entry,
+        )
+
+    def commit_chat_generation(
+        self,
+        model: Any,
+        plan: Optional[PromptCachePlan],
+        generated_token_ids: list[int],
+    ) -> dict[str, Any]:
+        if plan is None:
+            return create_empty_prompt_cache_state()
+
+        entry = self._planner.build_cache_entry(model=model, plan=plan, generated_token_ids=generated_token_ids)
+        if entry is None:
+            self.release_chat_cache_session(plan.cache_session_id)
+            return create_empty_prompt_cache_state()
+
+        with self._lock:
+            self._entries[plan.cache_session_id] = entry
+        return create_prompt_cache_state(
+            cache_session_id=plan.cache_session_id,
+            status=PROMPT_CACHE_STATE_READY,
+        )
+
+    def release_chat_cache_session(self, state_or_session_id: Any) -> None:
+        cache_session_id = self._resolve_session_id(state_or_session_id)
+        if not cache_session_id:
+            return
+
+        with self._lock:
+            entry = self._entries.pop(cache_session_id, None)
+
+        self._dispose_entries([entry])
+
+    def clear_chat_caches(self) -> None:
+        with self._lock:
+            entries = list(self._entries.values())
+            self._entries.clear()
+
+        self._dispose_entries(entries)
+
+    def _resolve_session_id(self, state_or_session_id: Any) -> str:
+        if isinstance(state_or_session_id, str):
+            return state_or_session_id.strip()
+        return get_prompt_cache_session_id(state_or_session_id)
+
+    @staticmethod
+    def _dispose_entries(entries: list[Optional[PromptCacheEntry]]) -> None:
+        released_any = False
+        for entry in entries:
+            if entry is None:
+                continue
+            entry.prompt_cache = None
+            entry.token_ids = []
+            entry.media_sequence = []
+            released_any = True
+
+        if not released_any:
+            return
+
+        gc.collect()
+        mlx.core.clear_cache()

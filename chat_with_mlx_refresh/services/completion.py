@@ -131,7 +131,7 @@ class CompletionService:
                 presence_penalty=presence_penalty,
                 stream=stream,
             )
-            await asyncio.to_thread(self.model_manager.close_active_generator)
+            await asyncio.to_thread(self.model_manager.close_active_generator, clear_runtime_cache=False)
             self.generation_stop_event.clear()
             bridge = ThreadedGeneratorBridge(generator, self.generation_stop_event)
             self.model_manager.set_active_generator(bridge)

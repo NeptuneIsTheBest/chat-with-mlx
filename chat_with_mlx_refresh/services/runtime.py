@@ -176,7 +176,11 @@ class RuntimeService:
     def clear_cache(self) -> None:
         self.stop_generation()
         self.file_service.clear()
-        self.model_manager.close_active_generator()
+        self.model_manager.close_active_generator(clear_runtime_cache=False)
+        self.model_manager.clear_chat_caches()
+
+    def release_prompt_cache_state(self, state: Any) -> None:
+        self.model_manager.release_chat_cache_session(state)
 
     def close(self) -> None:
         self.model_manager.close_model()

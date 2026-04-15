@@ -201,6 +201,12 @@ MULTI_LANGUAGE = {
                         "quantize": {
                             "label": "Quantize"
                         },
+                        "kv_cache_backend": {
+                            "label": "KV Cache Backend"
+                        },
+                        "turboquant_bits": {
+                            "label": "TurboQuant Bits"
+                        },
                         "default_language": {
                             "label": "Default Language"
                         },

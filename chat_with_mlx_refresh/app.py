@@ -45,7 +45,7 @@ def get_runtime() -> tuple[AppContext, gr.Blocks]:
 def start(port: int, share: bool = False, in_browser: bool = True) -> None:
     _, app = get_runtime()
     logger.info("Starting the app on port %s with share=%s and in_browser=%s", port, share, in_browser)
-    app.launch(server_port=port, inbrowser=in_browser, share=share, pwa=True)
+    app.launch(server_port=port, inbrowser=in_browser, share=share)
 
 
 def main() -> None:

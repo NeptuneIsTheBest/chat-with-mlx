@@ -11,7 +11,7 @@ from .async_stream import ThreadedGeneratorBridge
 from .context_management import ContextManagementService
 from .error_handling import raise_gradio_error
 from .files import FileService
-from .prompt_cache import PromptCacheService, PromptTokenRecorder, create_empty_prompt_cache_state
+from .prompt_cache import PromptTokenRecorder, create_empty_prompt_cache_state
 from .rag import RAGService
 from .structured_output import is_structured_ui_message
 from .streaming import StreamSession
@@ -79,7 +79,6 @@ class ChatService:
         self.rag_service = rag_service
         self.generation_stop_event = generation_stop_event
         self.context_management = ContextManagementService()
-        self.prompt_cache_service = PromptCacheService()
 
     def get_loaded_model(self) -> BaseLocalModel:
         model = self.model_manager.get_loaded_model()
@@ -369,7 +368,12 @@ class ChatService:
     def reset_context_state(self, auto_manage_context: bool = True) -> tuple[dict[str, Any], str]:
         return self.context_management.reset_context_state(auto_manage_context)
 
-    def reset_chat_state(self, auto_manage_context: bool = True) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    def reset_chat_state(
+        self,
+        auto_manage_context: bool = True,
+        prompt_cache_state: Optional[dict[str, Any]] = None,
+    ) -> tuple[dict[str, Any], str, dict[str, Any]]:
+        self.model_manager.release_chat_cache_session(prompt_cache_state)
         summary_state, status_text = self.reset_context_state(auto_manage_context)
         return summary_state, status_text, create_empty_prompt_cache_state()
 
@@ -437,7 +441,7 @@ class ChatService:
                 )
                 response_args["formatted_prompt"] = formatted_prompt
 
-                cache_plan = self.prompt_cache_service.prepare_chat_generation(
+                cache_plan = self.model_manager.prepare_chat_generation(
                     model=model,
                     prompt=formatted_prompt,
                     turn_media=context_result.turn_media,
@@ -468,7 +472,7 @@ class ChatService:
                     base_messages=[],
                     chunk_observer=prompt_token_recorder.observe,
                 )
-                transient_prompt_cache_state = create_empty_prompt_cache_state()
+                transient_prompt_cache_state = self.model_manager.normalize_prompt_cache_state(prompt_cache_state)
                 last_payload = None
                 for payload in session:
                     last_payload = payload
@@ -479,7 +483,7 @@ class ChatService:
                     yield final_payload, context_result.summary_state, context_result.status_text, transient_prompt_cache_state
 
                 if cache_plan is not None and not self.generation_stop_event.is_set():
-                    updated_prompt_cache_state = self.prompt_cache_service.build_success_state(
+                    updated_prompt_cache_state = self.model_manager.commit_chat_generation(
                         model=model,
                         plan=cache_plan,
                         generated_token_ids=prompt_token_recorder.token_ids,
@@ -527,7 +531,7 @@ class ChatService:
                 prompt_cache_state=prompt_cache_state,
                 stream=stream,
             )
-            await asyncio.to_thread(self.model_manager.close_active_generator)
+            await asyncio.to_thread(self.model_manager.close_active_generator, clear_runtime_cache=False)
             self.generation_stop_event.clear()
             bridge = ThreadedGeneratorBridge(generator, self.generation_stop_event)
             self.model_manager.set_active_generator(bridge)
