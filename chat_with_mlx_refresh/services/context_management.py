@@ -371,26 +371,9 @@ class ContextManagementService:
             return len(self._encode_text(model.tokenizer, prompt))
 
         if isinstance(model, MultimodalModel):
-            from mlx_vlm.utils import prepare_inputs
-
             images = [path for item in turn_media for path in item.get("images", [])]
             audios = [path for item in turn_media for path in item.get("audios", [])]
-            processor = model.processor
-            inner_model = model.model
-            add_special_tokens = (
-                not hasattr(processor, "chat_template")
-                if inner_model.config.model_type in {"gemma3", "gemma3n"}
-                else True
-            )
-            image_token_index = getattr(inner_model.config, "image_token_index", None)
-            inputs = prepare_inputs(
-                processor,
-                images=images,
-                audio=audios,
-                prompts=prompt,
-                image_token_index=image_token_index,
-                add_special_tokens=add_special_tokens,
-            )
+            inputs = model.prepare_prompt_inputs(prompt, images, audios)
             return int(inputs["input_ids"].size)
 
         tokenizer = self._get_text_tokenizer(model)

@@ -305,12 +305,25 @@ class MultimodalModel(BaseLocalModel):
     def make_prompt_cache(self):
         return mlx_vlm_cache.make_prompt_cache(self.model.language_model)
 
-    def prepare_prompt_inputs(self, prompt: str, images: list[str], audios: list[str]) -> dict[str, Any]:
+    @staticmethod
+    def _normalize_multimodal_paths(paths: Optional[list[str]]) -> Optional[list[str]]:
+        if not paths:
+            return None
+        return paths
+
+    def prepare_prompt_inputs(
+        self,
+        prompt: str,
+        images: Optional[list[str]],
+        audios: Optional[list[str]],
+    ) -> dict[str, Any]:
+        normalized_images = self._normalize_multimodal_paths(images)
+        normalized_audios = self._normalize_multimodal_paths(audios)
         image_token_index = getattr(self.model.config, "image_token_index", None)
         prepared = mlx_vlm.prepare_inputs(
             self.processor,
-            images=images,
-            audio=audios,
+            images=normalized_images,
+            audio=normalized_audios,
             prompts=prompt,
             image_token_index=image_token_index,
             add_special_tokens=self._default_add_special_tokens(),
@@ -550,8 +563,8 @@ class MultimodalModel(BaseLocalModel):
             else:
                 gen_args.update(prepared_inputs)
         else:
-            gen_args["image"] = kwargs.get("images", [])
-            gen_args["audio"] = kwargs.get("audios", [])
+            gen_args["image"] = self._normalize_multimodal_paths(kwargs.get("images"))
+            gen_args["audio"] = self._normalize_multimodal_paths(kwargs.get("audios"))
 
         if stream:
             return mlx_vlm.stream_generate(**gen_args)
