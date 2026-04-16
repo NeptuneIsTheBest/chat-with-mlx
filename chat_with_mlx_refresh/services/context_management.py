@@ -7,6 +7,8 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 from ..model import BaseLocalModel, Message, MessageRole, MultimodalModel, TextModel
+from .chat_prompting import ChatPromptBuilder
+from .chat_types import PreparedPrompt, TurnMedia
 
 
 logger = logging.getLogger(__name__)
@@ -38,7 +40,8 @@ def get_default_context_status(auto_manage_context: bool = True) -> str:
 @dataclass(slots=True)
 class ContextManagementResult:
     history: list[dict[str, Any]]
-    turn_media: list[dict[str, list[str]]]
+    turn_media: list[TurnMedia]
+    prepared_prompt: PreparedPrompt
     prompt_tokens: int
     available_prompt_tokens: int
     context_window: int
@@ -47,12 +50,15 @@ class ContextManagementResult:
 
 
 class ContextManagementService:
+    def __init__(self, prompt_builder: Optional[ChatPromptBuilder] = None) -> None:
+        self.prompt_builder = prompt_builder or ChatPromptBuilder()
+
     def manage_chat_context(
         self,
         model: BaseLocalModel,
         message_text: str,
         history: list[dict[str, Any]],
-        turn_media: list[dict[str, list[str]]],
+        turn_media: list[TurnMedia],
         max_tokens: int,
         auto_manage_context: bool,
         summary_state: Optional[dict[str, Any]],
@@ -66,24 +72,25 @@ class ContextManagementService:
                 "Lower max_tokens before sending the message."
             )
 
-        current_turn_media = turn_media[-1] if turn_media else {"images": [], "audios": []}
+        current_turn_media = turn_media[-1] if turn_media else TurnMedia()
         history_turn_media = turn_media[:-1] if turn_media else []
         system_message, system_media, non_system_history, non_system_media = self._split_system_message(
             history,
             history_turn_media,
         )
-        if self._count_prompt_tokens(
+        system_prompt_tokens, _ = self._prepare_prompt(
             model=model,
             message_text=message_text,
-            history=self._compose_history(system_message, system_media, [], []),
-            turn_media=[system_media, current_turn_media] if system_message else [current_turn_media],
-        ) > available_prompt_tokens:
+            history=self._compose_history(system_message, []),
+            turn_media=([system_media] if system_message else []) + [current_turn_media],
+        )
+        if system_prompt_tokens > available_prompt_tokens:
             raise RuntimeError(
                 "The current input plus the active system prompt exceed the available context window. "
                 "Shorten the message, reduce attached document content, lower RAG usage, or reduce max_tokens."
             )
 
-        full_prompt_tokens = self._count_prompt_tokens(
+        full_prompt_tokens, full_prepared_prompt = self._prepare_prompt(
             model=model,
             message_text=message_text,
             history=history,
@@ -93,6 +100,7 @@ class ContextManagementService:
             return ContextManagementResult(
                 history=history,
                 turn_media=turn_media,
+                prepared_prompt=full_prepared_prompt,
                 prompt_tokens=full_prompt_tokens,
                 available_prompt_tokens=available_prompt_tokens,
                 context_window=context_window,
@@ -132,7 +140,7 @@ class ContextManagementService:
                 raw_media=raw_tail_media,
                 current_turn_media=current_turn_media,
             )
-            prompt_tokens = self._count_prompt_tokens(
+            prompt_tokens, prepared_prompt = self._prepare_prompt(
                 model=model,
                 message_text=message_text,
                 history=managed_history,
@@ -142,6 +150,7 @@ class ContextManagementService:
                 return ContextManagementResult(
                     history=managed_history,
                     turn_media=managed_turn_media,
+                    prepared_prompt=prepared_prompt,
                     prompt_tokens=prompt_tokens,
                     available_prompt_tokens=available_prompt_tokens,
                     context_window=context_window,
@@ -165,7 +174,7 @@ class ContextManagementService:
                     raw_media=contracted_media,
                     current_turn_media=current_turn_media,
                 )
-                prompt_tokens = self._count_prompt_tokens(
+                prompt_tokens, prepared_prompt = self._prepare_prompt(
                     model=model,
                     message_text=message_text,
                     history=managed_history,
@@ -175,6 +184,7 @@ class ContextManagementService:
                     return ContextManagementResult(
                         history=managed_history,
                         turn_media=managed_turn_media,
+                        prepared_prompt=prepared_prompt,
                         prompt_tokens=prompt_tokens,
                         available_prompt_tokens=available_prompt_tokens,
                         context_window=context_window,
@@ -191,9 +201,9 @@ class ContextManagementService:
         fallback_history = list(raw_tail_history)
         fallback_media = list(raw_tail_media)
         while True:
-            managed_history = self._compose_history(system_message, system_media, fallback_history, fallback_media)
+            managed_history = self._compose_history(system_message, fallback_history)
             managed_turn_media = self._compose_turn_media(system_message, system_media, fallback_media, current_turn_media)
-            prompt_tokens = self._count_prompt_tokens(
+            prompt_tokens, prepared_prompt = self._prepare_prompt(
                 model=model,
                 message_text=message_text,
                 history=managed_history,
@@ -203,6 +213,7 @@ class ContextManagementService:
                 return ContextManagementResult(
                     history=managed_history,
                     turn_media=managed_turn_media,
+                    prepared_prompt=prepared_prompt,
                     prompt_tokens=prompt_tokens,
                     available_prompt_tokens=available_prompt_tokens,
                     context_window=context_window,
@@ -247,19 +258,17 @@ class ContextManagementService:
     def _split_system_message(
         self,
         history: list[dict[str, Any]],
-        turn_media: list[dict[str, list[str]]],
-    ) -> tuple[Optional[dict[str, Any]], dict[str, list[str]], list[dict[str, Any]], list[dict[str, list[str]]]]:
+        turn_media: list[TurnMedia],
+    ) -> tuple[Optional[dict[str, Any]], TurnMedia, list[dict[str, Any]], list[TurnMedia]]:
         if history and history[0].get("role") == MessageRole.SYSTEM.value:
-            system_media = turn_media[0] if turn_media else {"images": [], "audios": []}
+            system_media = turn_media[0] if turn_media else TurnMedia()
             return history[0], system_media, history[1:], turn_media[1:]
-        return None, {"images": [], "audios": []}, list(history), list(turn_media)
+        return None, TurnMedia(), list(history), list(turn_media)
 
     def _compose_history(
         self,
         system_message: Optional[dict[str, Any]],
-        system_media: dict[str, list[str]],
         raw_history: list[dict[str, Any]],
-        raw_media: list[dict[str, list[str]]],
     ) -> list[dict[str, Any]]:
         history: list[dict[str, Any]] = []
         if system_message is not None:
@@ -270,11 +279,11 @@ class ContextManagementService:
     def _compose_turn_media(
         self,
         system_message: Optional[dict[str, Any]],
-        system_media: dict[str, list[str]],
-        raw_media: list[dict[str, list[str]]],
-        current_turn_media: dict[str, list[str]],
-    ) -> list[dict[str, list[str]]]:
-        turn_media: list[dict[str, list[str]]] = []
+        system_media: TurnMedia,
+        raw_media: list[TurnMedia],
+        current_turn_media: TurnMedia,
+    ) -> list[TurnMedia]:
+        turn_media: list[TurnMedia] = []
         if system_message is not None:
             turn_media.append(system_media)
         turn_media.extend(raw_media)
@@ -284,14 +293,14 @@ class ContextManagementService:
     def _compose_managed_history(
         self,
         system_message: Optional[dict[str, Any]],
-        system_media: dict[str, list[str]],
+        system_media: TurnMedia,
         summary_text: str,
         raw_history: list[dict[str, Any]],
-        raw_media: list[dict[str, list[str]]],
-        current_turn_media: dict[str, list[str]],
-    ) -> tuple[list[dict[str, Any]], list[dict[str, list[str]]]]:
+        raw_media: list[TurnMedia],
+        current_turn_media: TurnMedia,
+    ) -> tuple[list[dict[str, Any]], list[TurnMedia]]:
         managed_history: list[dict[str, Any]] = []
-        managed_turn_media: list[dict[str, list[str]]] = []
+        managed_turn_media: list[TurnMedia] = []
 
         if system_message is not None:
             merged_system = dict(system_message)
@@ -300,7 +309,7 @@ class ContextManagementService:
             managed_turn_media.append(system_media)
         elif summary_text:
             managed_history.append(Message(MessageRole.SYSTEM, self._format_summary_block(summary_text)).to_dict())
-            managed_turn_media.append({"images": [], "audios": []})
+            managed_turn_media.append(TurnMedia())
 
         managed_history.extend(raw_history)
         managed_turn_media.extend(raw_media)
@@ -311,7 +320,7 @@ class ContextManagementService:
         self,
         model: BaseLocalModel,
         old_history: list[dict[str, Any]],
-        old_media: list[dict[str, list[str]]],
+        old_media: list[TurnMedia],
         system_message: Optional[dict[str, Any]],
         summary_state: dict[str, Any],
     ) -> dict[str, Any]:
@@ -358,33 +367,26 @@ class ContextManagementService:
             "model_signature": model_signature,
         }
 
-    def _count_prompt_tokens(
+    def _prepare_prompt(
         self,
         model: BaseLocalModel,
         message_text: str,
         history: list[dict[str, Any]],
-        turn_media: list[dict[str, list[str]]],
-    ) -> int:
-        message = Message(MessageRole.USER, message_text).to_dict()
-        prompt = model.format_chat_prompt(message=message, history=history, turn_media=turn_media)
-        if isinstance(model, TextModel):
-            return len(self._encode_text(model.tokenizer, prompt))
-
-        if isinstance(model, MultimodalModel):
-            images = [path for item in turn_media for path in item.get("images", [])]
-            audios = [path for item in turn_media for path in item.get("audios", [])]
-            inputs = model.prepare_prompt_inputs(prompt, images, audios)
-            return int(inputs["input_ids"].size)
-
-        tokenizer = self._get_text_tokenizer(model)
-        return len(self._encode_text(tokenizer, prompt))
+        turn_media: list[TurnMedia],
+    ) -> tuple[int, PreparedPrompt]:
+        return self.prompt_builder.count_prompt_tokens(
+            model=model,
+            message_text=message_text,
+            history=history,
+            turn_media=turn_media,
+        )
 
     def _summarize_messages(
         self,
         model: BaseLocalModel,
         existing_summary: str,
         messages: list[dict[str, Any]],
-        turn_media: list[dict[str, list[str]]],
+        turn_media: list[TurnMedia],
         context_window: int,
     ) -> str:
         max_source_tokens = max(1, min(4096, math.floor(context_window * 0.25)))
@@ -452,18 +454,18 @@ class ContextManagementService:
     def _render_messages_for_summary(
         self,
         messages: list[dict[str, Any]],
-        turn_media: list[dict[str, list[str]]],
+        turn_media: list[TurnMedia],
     ) -> list[str]:
         rendered: list[str] = []
         for index, message in enumerate(messages):
             role = str(message.get("role") or MessageRole.USER.value).upper()
             content = str(message.get("content") or "").strip()
-            media = turn_media[index] if index < len(turn_media) else {"images": [], "audios": []}
+            media = turn_media[index] if index < len(turn_media) else TurnMedia()
             media_parts = []
-            if media.get("images"):
-                media_parts.append(f"images={len(media['images'])}")
-            if media.get("audios"):
-                media_parts.append(f"audios={len(media['audios'])}")
+            if media.images:
+                media_parts.append(f"images={len(media.images)}")
+            if media.audios:
+                media_parts.append(f"audios={len(media.audios)}")
             media_suffix = f" [{' '.join(media_parts)}]" if media_parts else ""
             if content:
                 rendered.append(f"{role}{media_suffix}\n{content}")
@@ -495,15 +497,15 @@ class ContextManagementService:
     def _compute_history_signature(
         self,
         history: list[dict[str, Any]],
-        turn_media: list[dict[str, list[str]]],
+        turn_media: list[TurnMedia],
     ) -> str:
         parts: list[str] = []
         for index, item in enumerate(history):
             role = str(item.get("role") or "")
             content = str(item.get("content") or "")
-            media = turn_media[index] if index < len(turn_media) else {"images": [], "audios": []}
+            media = turn_media[index] if index < len(turn_media) else TurnMedia()
             parts.append(
-                f"{role}\n{content}\nimages={len(media.get('images', []))}\naudios={len(media.get('audios', []))}"
+                f"{role}\n{content}\nimages={len(media.images)}\naudios={len(media.audios)}"
             )
         return hashlib.sha256("\n---\n".join(parts).encode("utf-8")).hexdigest()
 

@@ -21,6 +21,7 @@ from mlx_vlm.generate import DEFAULT_PREFILL_STEP_SIZE, generation_stream as vlm
 from mlx_vlm.models import cache as mlx_vlm_cache
 
 from .model_config import ModelConfig, ModelConfigStore
+from .services.chat_types import PreparedPrompt
 from .services.prompt_cache import (
     PromptCachePlan,
     PromptCacheRegistry,
@@ -320,18 +321,90 @@ class MultimodalModel(BaseLocalModel):
         normalized_images = self._normalize_multimodal_paths(images)
         normalized_audios = self._normalize_multimodal_paths(audios)
         image_token_index = getattr(self.model.config, "image_token_index", None)
+        normalized, pixel_values_valid = self._prepare_multimodal_inputs(
+            prompt=prompt,
+            images=normalized_images,
+            audios=normalized_audios,
+            image_token_index=image_token_index,
+        )
+        if not pixel_values_valid and normalized_images and len(normalized_images) > 1:
+            normalized, pixel_values_valid = self._prepare_multimodal_inputs(
+                prompt=prompt,
+                images=normalized_images,
+                audios=normalized_audios,
+                image_token_index=image_token_index,
+                pad_to_uniform_size=True,
+            )
+        if not pixel_values_valid:
+            raise RuntimeError(
+                "Prepared multimodal inputs contain image tensors that cannot be batched for generation."
+            )
+        return normalized
+
+    def _prepare_multimodal_inputs(
+        self,
+        *,
+        prompt: str,
+        images: Optional[list[str]],
+        audios: Optional[list[str]],
+        image_token_index: Any,
+        pad_to_uniform_size: bool = False,
+    ) -> tuple[dict[str, Any], bool]:
         prepared = mlx_vlm.prepare_inputs(
             self.processor,
-            images=normalized_images,
-            audio=normalized_audios,
+            images=images,
+            audio=audios,
             prompts=prompt,
             image_token_index=image_token_index,
             add_special_tokens=self._default_add_special_tokens(),
+            pad_to_uniform_size=pad_to_uniform_size,
         )
-        normalized = dict(prepared)
+        return self._normalize_prepared_inputs(dict(prepared))
+
+    def _normalize_prepared_inputs(self, prepared_inputs: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+        normalized = dict(prepared_inputs)
+        pixel_values, pixel_values_valid = self._normalize_pixel_values(normalized.get("pixel_values"))
+        if pixel_values is not None:
+            normalized["pixel_values"] = pixel_values
         if "attention_mask" in normalized and "mask" not in normalized:
             normalized["mask"] = normalized.pop("attention_mask")
-        return normalized
+        return normalized, pixel_values_valid
+
+    @staticmethod
+    def _normalize_pixel_values(pixel_values: Any) -> tuple[Any, bool]:
+        if pixel_values is None or isinstance(pixel_values, mlx.core.array):
+            return pixel_values, True
+        if not isinstance(pixel_values, list) or not pixel_values:
+            return pixel_values, False
+
+        arrays: list[Any] = []
+        for value in pixel_values:
+            try:
+                arrays.append(value if isinstance(value, mlx.core.array) else mlx.core.array(value))
+            except (TypeError, ValueError):
+                return pixel_values, False
+
+        ndims = {len(value.shape) for value in arrays}
+        if len(ndims) != 1:
+            return pixel_values, False
+
+        ndim = ndims.pop()
+        try:
+            if ndim == 3:
+                shape = tuple(int(dim) for dim in arrays[0].shape)
+                if any(tuple(int(dim) for dim in value.shape) != shape for value in arrays[1:]):
+                    return pixel_values, False
+                batched = [mlx.core.expand_dims(value, axis=0) for value in arrays]
+                return mlx.core.concatenate(batched, axis=0), True
+            if ndim == 4:
+                shape = tuple(int(dim) for dim in arrays[0].shape[1:])
+                if any(tuple(int(dim) for dim in value.shape[1:]) != shape for value in arrays[1:]):
+                    return pixel_values, False
+                return mlx.core.concatenate(arrays, axis=0), True
+        except (TypeError, ValueError):
+            return pixel_values, False
+
+        return pixel_values, False
 
     @staticmethod
     def extract_prompt_token_ids(prepared_inputs: dict[str, Any]) -> list[int]:
@@ -572,7 +645,11 @@ class MultimodalModel(BaseLocalModel):
 
     def _prepare_cached_generation_inputs(self, prepared_inputs: dict[str, Any]) -> dict[str, Any]:
         input_ids = prepared_inputs["input_ids"]
-        pixel_values = prepared_inputs.get("pixel_values")
+        pixel_values, pixel_values_valid = self._normalize_pixel_values(prepared_inputs.get("pixel_values"))
+        if not pixel_values_valid:
+            raise RuntimeError(
+                "Prepared multimodal inputs contain image tensors that cannot be batched for cached generation."
+            )
         mask = prepared_inputs.get("mask")
         data_kwargs = {
             key: value
@@ -1084,14 +1161,12 @@ class ModelManager:
     def prepare_chat_generation(
         self,
         model: BaseLocalModel,
-        prompt: str,
-        turn_media: list[dict[str, list[str]]],
+        prepared_prompt: PreparedPrompt,
         state: Optional[dict[str, Any]],
     ) -> Optional[PromptCachePlan]:
         return self.prompt_cache_registry.prepare_chat_generation(
             model=model,
-            prompt=prompt,
-            turn_media=turn_media,
+            prepared_prompt=prepared_prompt,
             state=state,
         )
 

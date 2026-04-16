@@ -35,15 +35,15 @@ class FileService:
         self,
         allowed_roots: Optional[Iterable[str | Path]] = None,
     ) -> None:
-        self.files: dict[str, dict[str, str]] = {}
+        self.documents: dict[str, dict[str, str]] = {}
         self.allowed_roots: tuple[Path, ...] = ()
         self.set_allowed_roots(allowed_roots or ())
         self.loader_map = {
-            ".pdf": self.load_pdf,
-            ".docx": self.load_docx,
-            ".pptx": self.load_pptx,
-            **dict.fromkeys([".txt", ".csv", ".md"], self.load_txt_like),
-            **dict.fromkeys([".xlsx", ".xls"], self.load_excel),
+            ".pdf": self._read_pdf_content,
+            ".docx": self._read_docx_content,
+            ".pptx": self._read_pptx_content,
+            **dict.fromkeys([".txt", ".csv", ".md"], self._read_txt_like_content),
+            **dict.fromkeys([".xlsx", ".xls"], self._read_excel_content),
         }
 
     @staticmethod
@@ -78,61 +78,43 @@ class FileService:
             raise RuntimeError(f"File access outside allowed directories is not permitted: {file_name}")
         return resolved_path
 
-    def format_content(self, file_name: Path, content: str) -> str:
+    def render_document_for_prompt(self, file_name: Path, content: str) -> str:
         boundary_start = f"<<<BEGIN FILE:{file_name}>>>"
         boundary_end = f"<<<END FILE:{file_name}>>>"
         sanitized = content.replace(boundary_start, "").replace(boundary_end, "")
         return f"{boundary_start}\n{sanitized}\n{boundary_end}"
 
-    def _get_cached_content(self, file_name: Path, raw_content_only: bool) -> Optional[str]:
+    def _get_cached_document_text(self, file_name: Path) -> Optional[str]:
         file_key = get_canonical_file_path(file_name)
-        cached = self.files.get(file_key)
+        cached = self.documents.get(file_key)
         if not cached:
             return None
 
         try:
             current_md5 = get_file_md5(file_name)
         except OSError:
-            self.files.pop(file_key, None)
+            self.documents.pop(file_key, None)
             return None
 
         if cached["md5"] != current_md5:
-            self.files.pop(file_key, None)
+            self.documents.pop(file_key, None)
             return None
-        return cached["content" if raw_content_only else "formatted_content"]
+        return cached["content"]
 
-    def _store_content(self, file_name: Path, content: str) -> None:
-        self.files[get_canonical_file_path(file_name)] = {
+    def _store_document_text(self, file_name: Path, content: str) -> None:
+        self.documents[get_canonical_file_path(file_name)] = {
             "md5": get_file_md5(file_name),
-            "formatted_content": self.format_content(file_name, content),
             "content": content,
         }
 
-    def _render_loaded_content(self, file_name: Path, content: str, raw_content_only: bool) -> str:
-        if raw_content_only:
-            return content
-        return self.format_content(file_name, content)
-
-    def _finalize_loaded_content(
+    def _read_document(
         self,
         file_name: Path,
-        content: str,
-        raw_content_only: bool,
-        use_cache: bool,
-    ) -> str:
-        if use_cache:
-            self._store_content(file_name, content)
-        return self._render_loaded_content(file_name, content, raw_content_only)
-
-    def _load_file(
-        self,
-        file_name: Path,
-        raw_content_only: bool = False,
         use_cache: bool = True,
     ) -> Optional[str]:
         resolved_path = self._validate_file_access(file_name)
         if use_cache:
-            cached_content = self._get_cached_content(resolved_path, raw_content_only)
+            cached_content = self._get_cached_document_text(resolved_path)
             if cached_content is not None:
                 return cached_content
 
@@ -140,37 +122,42 @@ class FileService:
         if loader is None:
             suffix = resolved_path.suffix.lower() or "[no extension]"
             raise RuntimeError(f"Unsupported file type: {suffix}")
-        return loader(resolved_path, raw_content_only, use_cache=use_cache)
+        content = loader(resolved_path)
+        if use_cache:
+            self._store_document_text(resolved_path, content)
+        return content
+
+    def read_document_text(self, file_name: Path) -> Optional[str]:
+        return self._read_document(file_name, use_cache=True)
+
+    def read_document_text_uncached(self, file_name: Path) -> Optional[str]:
+        return self._read_document(file_name, use_cache=False)
 
     def load_file(self, file_name: Path, raw_content_only: bool = False) -> Optional[str]:
-        return self._load_file(file_name, raw_content_only=raw_content_only, use_cache=True)
+        resolved_path = self._validate_file_access(file_name)
+        content = self.read_document_text(resolved_path)
+        if content is None or raw_content_only:
+            return content
+        return self.render_document_for_prompt(resolved_path, content)
 
     def load_file_uncached(self, file_name: Path, raw_content_only: bool = False) -> Optional[str]:
-        return self._load_file(file_name, raw_content_only=raw_content_only, use_cache=False)
+        resolved_path = self._validate_file_access(file_name)
+        content = self.read_document_text_uncached(resolved_path)
+        if content is None or raw_content_only:
+            return content
+        return self.render_document_for_prompt(resolved_path, content)
 
-    def load_pdf(
-        self,
-        file_name: Path,
-        raw_content_only: bool = False,
-        use_cache: bool = True,
-    ) -> Optional[str]:
+    def _read_pdf_content(self, file_name: Path) -> str:
         try:
             from pypdf import PdfReader
         except ImportError as exc:
             raise RuntimeError("pypdf is not installed.") from exc
 
         pdf = PdfReader(file_name)
-        content = "".join(text for page in pdf.pages if (text := page.extract_text()))
-        return self._finalize_loaded_content(file_name, content, raw_content_only, use_cache)
+        return "".join(text for page in pdf.pages if (text := page.extract_text()))
 
-    def load_txt_like(
-        self,
-        file_name: Path,
-        raw_content_only: bool = False,
-        use_cache: bool = True,
-    ) -> str:
-        content = self._read_text_content(file_name)
-        return self._finalize_loaded_content(file_name, content, raw_content_only, use_cache)
+    def _read_txt_like_content(self, file_name: Path) -> str:
+        return self._read_text_content(file_name)
 
     def _read_text_content(self, file_name: Path) -> str:
         decode_error = None
@@ -185,27 +172,16 @@ class FileService:
         with open(file_name, "r", encoding="utf-8", errors="replace") as file_obj:
             return file_obj.read()
 
-    def load_docx(
-        self,
-        file_name: Path,
-        raw_content_only: bool = False,
-        use_cache: bool = True,
-    ) -> Optional[str]:
+    def _read_docx_content(self, file_name: Path) -> str:
         try:
             from docx import Document
         except ImportError as exc:
             raise RuntimeError("python-docx is not installed.") from exc
 
         document = Document(str(file_name))
-        content = "\n".join(paragraph.text for paragraph in document.paragraphs)
-        return self._finalize_loaded_content(file_name, content, raw_content_only, use_cache)
+        return "\n".join(paragraph.text for paragraph in document.paragraphs)
 
-    def load_pptx(
-        self,
-        file_name: Path,
-        raw_content_only: bool = False,
-        use_cache: bool = True,
-    ) -> Optional[str]:
+    def _read_pptx_content(self, file_name: Path) -> str:
         try:
             from pptx import Presentation
         except ImportError as exc:
@@ -217,15 +193,9 @@ class FileService:
             for shape in slide.shapes:
                 if hasattr(shape, "text") and shape.text:
                     content_parts.append(shape.text)
-        content = "\n".join(content_parts)
-        return self._finalize_loaded_content(file_name, content, raw_content_only, use_cache)
+        return "\n".join(content_parts)
 
-    def load_excel(
-        self,
-        file_name: Path,
-        raw_content_only: bool = False,
-        use_cache: bool = True,
-    ) -> Optional[str]:
+    def _read_excel_content(self, file_name: Path) -> str:
         try:
             from pandas import ExcelFile, read_excel
         except ImportError as exc:
@@ -237,8 +207,7 @@ class FileService:
             data_frame = read_excel(excel_file, sheet_name=sheet_name)
             content_parts.append(f"Sheet: {sheet_name}\n")
             content_parts.append(data_frame.to_csv(index=False))
-        content = "".join(content_parts)
-        return self._finalize_loaded_content(file_name, content, raw_content_only, use_cache)
+        return "".join(content_parts)
 
     def clear(self) -> None:
-        self.files.clear()
+        self.documents.clear()

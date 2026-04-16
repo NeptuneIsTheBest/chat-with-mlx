@@ -331,7 +331,7 @@ class RAGService:
         for file_ref in files:
             file_path = Path(getattr(file_ref, "name", file_ref))
             try:
-                file_content = file_service.load_file_uncached(file_path, raw_content_only=True)
+                file_content = file_service.read_document_text_uncached(file_path)
                 if file_content:
                     _, message = self.add_document(file_path, file_content)
                     results.append(f"{file_path.name}: {message}")
