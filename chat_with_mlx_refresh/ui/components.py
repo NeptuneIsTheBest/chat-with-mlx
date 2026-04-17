@@ -22,6 +22,7 @@ class ChatUI:
     context_status: gr.Textbox
     context_summary_state: gr.State
     prompt_cache_state: gr.State
+    audio_transcript_state: gr.State
     rag_form: dict[str, Any]
     chatbot: gr.Chatbot
 

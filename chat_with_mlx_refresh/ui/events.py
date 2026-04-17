@@ -30,7 +30,12 @@ def bind_events(
     ).then(
         fn=chat_service.reset_chat_state,
         inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
-        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+        outputs=[
+            ui.chat.context_summary_state,
+            ui.chat.context_status,
+            ui.chat.prompt_cache_state,
+            ui.chat.audio_transcript_state,
+        ],
     )
     ui.chat.system_prompt.change(
         fn=runtime_service.model_manager.set_custom_prompt,
@@ -38,19 +43,34 @@ def bind_events(
     ).then(
         fn=chat_service.reset_chat_state,
         inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
-        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+        outputs=[
+            ui.chat.context_summary_state,
+            ui.chat.context_status,
+            ui.chat.prompt_cache_state,
+            ui.chat.audio_transcript_state,
+        ],
     )
     ui.chat.auto_manage_context.change(
         fn=chat_service.reset_chat_state,
         inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
-        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+        outputs=[
+            ui.chat.context_summary_state,
+            ui.chat.context_status,
+            ui.chat.prompt_cache_state,
+            ui.chat.audio_transcript_state,
+        ],
     )
     ui.chat.chatbot.clear(
         fn=runtime_service.clear_cache,
     ).then(
         fn=chat_service.reset_chat_state,
         inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
-        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+        outputs=[
+            ui.chat.context_summary_state,
+            ui.chat.context_status,
+            ui.chat.prompt_cache_state,
+            ui.chat.audio_transcript_state,
+        ],
     )
 
     ui.chat.model_selector.select(
@@ -92,7 +112,12 @@ def bind_events(
     ).then(
         fn=chat_service.reset_chat_state,
         inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
-        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+        outputs=[
+            ui.chat.context_summary_state,
+            ui.chat.context_status,
+            ui.chat.prompt_cache_state,
+            ui.chat.audio_transcript_state,
+        ],
     )
 
     ui.completion.load_button.click(
@@ -123,7 +148,12 @@ def bind_events(
     ).then(
         fn=chat_service.reset_chat_state,
         inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
-        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+        outputs=[
+            ui.chat.context_summary_state,
+            ui.chat.context_status,
+            ui.chat.prompt_cache_state,
+            ui.chat.audio_transcript_state,
+        ],
     )
 
     ui.model_management.form["search_button"].click(
@@ -260,7 +290,12 @@ def bind_events(
     ).then(
         fn=chat_service.reset_chat_state,
         inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
-        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+        outputs=[
+            ui.chat.context_summary_state,
+            ui.chat.context_status,
+            ui.chat.prompt_cache_state,
+            ui.chat.audio_transcript_state,
+        ],
     )
 
     ui.chat.rag_form["rag_enabled"].change(
@@ -324,5 +359,10 @@ def bind_events(
     ).then(
         fn=chat_service.reset_chat_state,
         inputs=[ui.chat.auto_manage_context, ui.chat.prompt_cache_state],
-        outputs=[ui.chat.context_summary_state, ui.chat.context_status, ui.chat.prompt_cache_state],
+        outputs=[
+            ui.chat.context_summary_state,
+            ui.chat.context_status,
+            ui.chat.prompt_cache_state,
+            ui.chat.audio_transcript_state,
+        ],
     )

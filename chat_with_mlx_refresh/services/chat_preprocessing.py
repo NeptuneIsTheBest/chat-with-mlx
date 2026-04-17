@@ -12,7 +12,6 @@ from .structured_output import is_structured_ui_message
 
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png", ".heic", ".heif", ".webp", ".bmp", ".gif"}
 AUDIO_EXTENSIONS = {".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg", ".opus"}
-AUDIO_HISTORY_PLACEHOLDER = "[Earlier audio attachment omitted from this prompt.]"
 
 
 class ChatPreprocessor:
@@ -44,7 +43,6 @@ class ChatPreprocessor:
         current_message: NormalizedTurn,
         history: list[dict[str, Any]],
         system_prompt: Optional[str],
-        model_instance: BaseLocalModel,
     ) -> tuple[str, list[dict[str, Any]], list[TurnMedia]]:
         effective_history: list[dict[str, Any]] = []
         if system_prompt and system_prompt.strip():
@@ -91,13 +89,6 @@ class ChatPreprocessor:
 
         turn_media_sequence = history_turn_media + [current_turn_media]
         self._validate_turn_audio_inputs(turn_media_sequence)
-        processed_message_text, preprocessed_history, turn_media_sequence = self._normalize_prompt_audio_inputs(
-            model_instance=model_instance,
-            message_text=processed_message_text,
-            history=preprocessed_history,
-            turn_media_sequence=turn_media_sequence,
-        )
-        self.validate_multimodal_inputs(model_instance, turn_media_sequence)
         return processed_message_text, preprocessed_history, turn_media_sequence
 
     def validate_multimodal_inputs(
@@ -155,50 +146,6 @@ class ChatPreprocessor:
     def _validate_turn_audio_inputs(turn_media_sequence: list[TurnMedia]) -> None:
         if any(len(turn_media.audios) > 1 for turn_media in turn_media_sequence):
             raise RuntimeError("Only one audio file is supported per message.")
-
-    def _normalize_prompt_audio_inputs(
-        self,
-        model_instance: BaseLocalModel,
-        message_text: str,
-        history: list[dict[str, Any]],
-        turn_media_sequence: list[TurnMedia],
-    ) -> tuple[str, list[dict[str, Any]], list[TurnMedia]]:
-        prompt_audio_limit = model_instance.get_prompt_audio_limit()
-        if prompt_audio_limit is None:
-            return message_text, history, turn_media_sequence
-
-        normalized_limit = max(0, int(prompt_audio_limit))
-        audio_turn_indexes = [index for index, turn_media in enumerate(turn_media_sequence) if turn_media.audios]
-        if len(audio_turn_indexes) <= normalized_limit:
-            return message_text, history, turn_media_sequence
-
-        kept_audio_turn_indexes = set(audio_turn_indexes[-normalized_limit:]) if normalized_limit else set()
-        normalized_history = [dict(history_item) for history_item in history]
-        normalized_turn_media = [
-            TurnMedia(images=list(turn_media.images), audios=list(turn_media.audios))
-            for turn_media in turn_media_sequence
-        ]
-        normalized_message_text = message_text
-
-        for index in audio_turn_indexes:
-            if index in kept_audio_turn_indexes:
-                continue
-
-            normalized_turn_media[index].audios = []
-            if index < len(normalized_history):
-                content = normalized_history[index].get("content")
-                normalized_history[index]["content"] = self._ensure_turn_content(content, normalized_turn_media[index])
-            else:
-                normalized_message_text = self._ensure_turn_content(normalized_message_text, normalized_turn_media[index])
-
-        return normalized_message_text, normalized_history, normalized_turn_media
-
-    @staticmethod
-    def _ensure_turn_content(content: Any, turn_media: TurnMedia) -> str:
-        normalized_content = "" if content is None else str(content)
-        if normalized_content.strip() or turn_media.images or turn_media.audios:
-            return normalized_content
-        return AUDIO_HISTORY_PLACEHOLDER
 
     @staticmethod
     def _normalize_text_content(text_content: Any) -> str:

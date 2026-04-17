@@ -3,6 +3,7 @@ from __future__ import annotations
 import gradio as gr
 
 from ..language import get_text
+from ..services.audio_transcription import create_empty_audio_transcript_state
 from ..services.context_management import create_empty_context_summary_state, get_default_context_status
 from ..services.model_management import ModelManagementService
 from ..services.prompt_cache import create_empty_prompt_cache_state
@@ -61,6 +62,7 @@ def build_app_layout(
             value=create_empty_prompt_cache_state(),
             delete_callback=runtime_service.release_prompt_cache_state,
         )
+        chat_audio_transcript_state = gr.State(value=create_empty_audio_transcript_state())
         chat_rag_form = {
             "rag_enabled": gr.Checkbox(
                 label=get_text("Page.Chat.Accordion.RAGSetting.Checkbox.rag_enabled.label"),
@@ -313,8 +315,14 @@ def build_app_layout(
                             chat_auto_manage_context_checkbox,
                             chat_context_summary_state,
                             chat_prompt_cache_state,
+                            chat_audio_transcript_state,
                         ],
-                        additional_outputs=[chat_context_summary_state, chat_context_status_textbox, chat_prompt_cache_state],
+                        additional_outputs=[
+                            chat_context_summary_state,
+                            chat_context_status_textbox,
+                            chat_prompt_cache_state,
+                            chat_audio_transcript_state,
+                        ],
                     )
 
         with gr.Tab(get_text("Tab.completion"), interactive=True):
@@ -399,6 +407,7 @@ def build_app_layout(
             context_status=chat_context_status_textbox,
             context_summary_state=chat_context_summary_state,
             prompt_cache_state=chat_prompt_cache_state,
+            audio_transcript_state=chat_audio_transcript_state,
             rag_form=chat_rag_form,
             chatbot=chatbot,
         ),

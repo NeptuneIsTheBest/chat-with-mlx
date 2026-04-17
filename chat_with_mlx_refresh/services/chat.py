@@ -5,6 +5,11 @@ import logging
 from typing import Any, AsyncIterator, Iterator, Optional
 
 from ..model import BaseLocalModel, ModelManager, MultimodalModel
+from .audio_transcription import (
+    AudioTranscriptRetainer,
+    create_empty_audio_transcript_state,
+    normalize_audio_transcript_state,
+)
 from .async_stream import ThreadedGeneratorBridge
 from .chat_preprocessing import ChatPreprocessor
 from .chat_prompting import ChatPromptBuilder
@@ -73,6 +78,7 @@ class ChatService:
         self.generation_stop_event = generation_stop_event
         self.prompt_builder = ChatPromptBuilder()
         self.preprocessor = ChatPreprocessor(file_service)
+        self.audio_transcript_retainer = AudioTranscriptRetainer(prompt_builder=self.prompt_builder)
         self.context_management = ContextManagementService(prompt_builder=self.prompt_builder)
 
     def get_loaded_model(self) -> BaseLocalModel:
@@ -102,10 +108,15 @@ class ChatService:
         self,
         auto_manage_context: bool = True,
         prompt_cache_state: Optional[dict[str, Any]] = None,
-    ) -> tuple[dict[str, Any], str, dict[str, Any]]:
+    ) -> tuple[dict[str, Any], str, dict[str, Any], dict[str, Any]]:
         self.model_manager.release_chat_cache_session(prompt_cache_state)
         summary_state, status_text = self.reset_context_state(auto_manage_context)
-        return summary_state, status_text, create_empty_prompt_cache_state()
+        return (
+            summary_state,
+            status_text,
+            create_empty_prompt_cache_state(),
+            create_empty_audio_transcript_state(),
+        )
 
     def handle_chat(
         self,
@@ -124,6 +135,7 @@ class ChatService:
         auto_manage_context: bool = True,
         context_summary_state: Optional[dict[str, Any]] = None,
         prompt_cache_state: Optional[dict[str, Any]] = None,
+        audio_transcript_state: Optional[dict[str, Any]] = None,
         stream: bool = True,
     ) -> Iterator[Any]:
         try:
@@ -136,8 +148,18 @@ class ChatService:
                     normalized_message,
                     history,
                     system_prompt,
-                    model,
                 )
+                audio_retention = self.audio_transcript_retainer.retain_audio_context(
+                    model=model,
+                    message_text=processed_message_text,
+                    history=processed_history_list,
+                    turn_media=turn_media,
+                    transcript_state=audio_transcript_state,
+                )
+                processed_message_text = audio_retention.message_text
+                processed_history_list = audio_retention.history
+                turn_media = audio_retention.turn_media
+                self.preprocessor.validate_multimodal_inputs(model, turn_media)
                 context_result = self.context_management.manage_chat_context(
                     model=model,
                     message_text=processed_message_text,
@@ -198,14 +220,31 @@ class ChatService:
                     chunk_observer=prompt_token_recorder.observe,
                 )
                 transient_prompt_cache_state = self.model_manager.normalize_prompt_cache_state(prompt_cache_state)
+                transient_audio_transcript_state = normalize_audio_transcript_state(audio_retention.transcript_state)
+                status_text = self._build_chat_status_text(
+                    context_status_text=context_result.status_text,
+                    retained_transcript_turn_count=audio_retention.retained_transcript_turn_count,
+                )
                 last_payload = None
                 for payload in session:
                     last_payload = payload
-                    yield payload, context_result.summary_state, context_result.status_text, transient_prompt_cache_state
+                    yield (
+                        payload,
+                        context_result.summary_state,
+                        status_text,
+                        transient_prompt_cache_state,
+                        transient_audio_transcript_state,
+                    )
 
                 final_payload = session.final_messages or last_payload
                 if final_payload is not None and final_payload != last_payload:
-                    yield final_payload, context_result.summary_state, context_result.status_text, transient_prompt_cache_state
+                    yield (
+                        final_payload,
+                        context_result.summary_state,
+                        status_text,
+                        transient_prompt_cache_state,
+                        transient_audio_transcript_state,
+                    )
 
                 if cache_plan is not None and not self.generation_stop_event.is_set():
                     updated_prompt_cache_state = self.model_manager.commit_chat_generation(
@@ -214,7 +253,13 @@ class ChatService:
                         generated_token_ids=prompt_token_recorder.token_ids,
                     )
                     if final_payload is not None:
-                        yield final_payload, context_result.summary_state, context_result.status_text, updated_prompt_cache_state
+                        yield (
+                            final_payload,
+                            context_result.summary_state,
+                            status_text,
+                            updated_prompt_cache_state,
+                            transient_audio_transcript_state,
+                        )
         except Exception as exc:
             raise_gradio_error(exc, logger=logger, action="handle chat requests")
 
@@ -235,6 +280,7 @@ class ChatService:
         auto_manage_context: bool = True,
         context_summary_state: Optional[dict[str, Any]] = None,
         prompt_cache_state: Optional[dict[str, Any]] = None,
+        audio_transcript_state: Optional[dict[str, Any]] = None,
         stream: bool = True,
     ) -> AsyncIterator[Any]:
         try:
@@ -254,6 +300,7 @@ class ChatService:
                 auto_manage_context=auto_manage_context,
                 context_summary_state=context_summary_state,
                 prompt_cache_state=prompt_cache_state,
+                audio_transcript_state=audio_transcript_state,
                 stream=stream,
             )
             await asyncio.to_thread(self.model_manager.close_active_generator, clear_runtime_cache=False)
@@ -269,3 +316,19 @@ class ChatService:
                 self.model_manager.remove_active_generator(bridge)
         except Exception as exc:
             raise_gradio_error(exc, logger=logger, action="stream chat responses")
+
+    @staticmethod
+    def _build_chat_status_text(
+        *,
+        context_status_text: str,
+        retained_transcript_turn_count: int,
+    ) -> str:
+        if retained_transcript_turn_count <= 0:
+            return context_status_text
+        turn_label = "turn was" if retained_transcript_turn_count == 1 else "turns were"
+        audio_status = (
+            f"{retained_transcript_turn_count} earlier audio {turn_label} retained as transcripts for this prompt."
+        )
+        if not context_status_text.strip():
+            return audio_status
+        return f"{audio_status}\n{context_status_text}"
