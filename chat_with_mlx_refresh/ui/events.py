@@ -216,6 +216,7 @@ def bind_events(
         outputs=[ui.completion.model_selector],
     ).then(
         fn=model_management_service.update_delete_model_selector_choices,
+        inputs=[ui.model_management.form["delete_model_selector"]],
         outputs=[ui.model_management.form["delete_model_selector"]],
     )
     ui.model_management.form["delete_button"].click(
@@ -236,6 +237,7 @@ def bind_events(
         outputs=[ui.completion.model_selector],
     ).then(
         fn=model_management_service.update_delete_model_selector_choices,
+        inputs=[ui.model_management.form["delete_model_selector"]],
         outputs=[ui.model_management.form["delete_model_selector"]],
     ).then(
         fn=runtime_service.get_runtime_snapshot,
@@ -295,6 +297,9 @@ def bind_events(
     ).then(
         fn=model_management_service.update_model_selector_choices,
         outputs=[ui.completion.model_selector],
+    ).then(
+        fn=model_management_service.update_delete_model_selector_choices,
+        outputs=[ui.model_management.form["delete_model_selector"]],
     ).then(
         fn=runtime_service.get_runtime_snapshot,
         outputs=[

@@ -218,8 +218,10 @@ class ModelManagementService:
     def update_model_selector_choices(self):
         return gr.update(choices=self.get_model_list(), value=self.update_select_model_dropdown_value())
 
-    def update_delete_model_selector_choices(self):
-        return gr.update(choices=self.get_model_list())
+    def update_delete_model_selector_choices(self, current_value: Optional[str] = None):
+        model_list = self.get_model_list()
+        value = current_value if current_value in model_list else None
+        return gr.update(choices=model_list, value=value)
 
     @gradio_error_boundary("add a model configuration", logger)
     def add_model(
