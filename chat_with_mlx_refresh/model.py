@@ -120,6 +120,9 @@ class BaseLocalModel(ABC):
     def supports_multimodal_ability(self, ability: str) -> bool:
         return ability in self.get_multimodal_abilities()
 
+    def get_prompt_audio_limit(self) -> Optional[int]:
+        return None
+
     def generate_completion(
         self,
         prompt: str,
@@ -744,6 +747,9 @@ class MultimodalModel(BaseLocalModel):
 
     def get_multimodal_abilities(self) -> list[str]:
         return list(self.multimodal_ability)
+
+    def get_prompt_audio_limit(self) -> Optional[int]:
+        return 1 if self.supports_multimodal_ability("audio") else None
 
     def close(self) -> None:
         self.model = None
