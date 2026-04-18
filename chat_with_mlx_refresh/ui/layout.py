@@ -141,21 +141,6 @@ def build_app_layout(
                 interactive=True,
                 render=False,
             ),
-            "kv_cache_backend": gr.Dropdown(
-                label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.kv_cache_backend.label"),
-                choices=model_management_service.get_kv_cache_backend_choices(),
-                value=ModelManagementService.KV_CACHE_BACKEND_DEFAULT,
-                interactive=True,
-                render=False,
-            ),
-            "turboquant_bits": gr.Dropdown(
-                label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.turboquant_bits.label"),
-                choices=model_management_service.get_turboquant_bits_choices(),
-                value=4,
-                interactive=True,
-                render=False,
-                visible=False,
-            ),
             "default_language": gr.Dropdown(
                 label=get_text("Page.ModelManagement.AddLocalModelBlock.Dropdown.default_language.label"),
                 choices=["multi"],
@@ -376,8 +361,6 @@ def build_app_layout(
                     local_model_form["model_name"].render()
                     local_model_form["mlx_repo"].render()
                     local_model_form["quantize"].render()
-                    local_model_form["kv_cache_backend"].render()
-                    local_model_form["turboquant_bits"].render()
                     local_model_form["default_language"].render()
                     local_model_form["system_prompt"].render()
                     local_model_form["multimodal_mode"].render()

@@ -102,8 +102,6 @@ You can add various models from [mlx-community](https://huggingface.co/mlx-commu
 
 When you add a model from the UI, multimodal abilities can be auto-detected to prefill the form. After you save the configuration, the saved `multimodal_ability` value is what the app uses at load time.
 
-`mlx-optiq` is installed by default. OptiQ weight-quantized models still load like normal MLX models, and you can optionally enable TurboQuant as the KV cache backend for compatible text models.
-
 For the following configuration files, the model files will be stored in `models/models/Ministral-8B-Instruct-2410-4bit`.
 
 **Ministral-8B-Instruct-2410-4bit.json**
@@ -113,8 +111,6 @@ For the following configuration files, the model files will be stored in `models
   "mlx_repo": "mlx-community/Ministral-8B-Instruct-2410-4bit",
   "model_name": "Ministral-8B-Instruct-2410-4bit",
   "quantize": "4bit",
-  "kv_cache_backend": "turboquant",
-  "turboquant_bits": 4,
   "default_language": "multi",
   "system_prompt": "",
   "multimodal_ability": []
@@ -124,8 +120,6 @@ For the following configuration files, the model files will be stored in `models
 - `mlx_repo`: The repository in the MLX community.
 - `model_name`: The name of the model.
 - `quantize`: The quantization format of the model (e.g., `4bit`).
-- `kv_cache_backend`: KV cache backend. Use `turboquant` to enable `mlx-optiq` for compatible text models.
-- `turboquant_bits`: TurboQuant bit-width. The UI currently exposes `3` and `4`.
 - `default_language`: Default language setting (e.g., `multi` for multilingual support).
 - `system_prompt`: The system prompt of the model.
 - `multimodal_ability`: The effective multimodal capabilities used when loading the model. An empty list forces text-only loading.

@@ -3,7 +3,6 @@ gradio == 6.10.0
 mlx >= 0.31.1
 mlx-lm >= 0.31.1
 mlx-vlm >= 0.4.3
-mlx-optiq >= 0.0.4
 
 tiktoken
 huggingface-hub

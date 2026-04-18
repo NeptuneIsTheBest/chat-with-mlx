@@ -27,7 +27,6 @@ from .services.prompt_cache import (
     PromptCacheRegistry,
     normalize_prompt_cache_state as normalize_prompt_cache_state_descriptor,
 )
-from .turboquant import TurboQuantAdapter
 
 
 logger = logging.getLogger(__name__)
@@ -181,8 +180,7 @@ class TextModel(BaseLocalModel):
         return list(tokens)
 
     def make_prompt_cache(self):
-        prompt_cache = mlx_lm_cache.make_prompt_cache(self.model)
-        return TurboQuantAdapter.build_text_prompt_cache(self.model, self.model_config, prompt_cache)
+        return mlx_lm_cache.make_prompt_cache(self.model)
 
     def perform_generation(
         self,
@@ -220,8 +218,6 @@ class TextModel(BaseLocalModel):
         prompt_token_ids = kwargs.get("prompt_token_ids")
         prompt_cache = kwargs.get("prompt_cache")
         cached_prefix_len = max(0, int(kwargs.get("cached_prefix_len") or 0))
-        if prompt_cache is None and TurboQuantAdapter.is_enabled(self.model_config):
-            prompt_cache = self.make_prompt_cache()
         if prompt_token_ids is not None:
             prompt_tokens = list(prompt_token_ids)
             if cached_prefix_len:

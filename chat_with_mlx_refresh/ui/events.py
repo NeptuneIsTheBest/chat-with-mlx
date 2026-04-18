@@ -168,16 +168,7 @@ def bind_events(
             ui.model_management.form["model_name"],
             ui.model_management.form["mlx_repo"],
             ui.model_management.form["quantize"],
-            ui.model_management.form["kv_cache_backend"],
-            ui.model_management.form["turboquant_bits"],
         ],
-    ).then(
-        fn=model_management_service.update_turboquant_ui_state,
-        inputs=[
-            ui.model_management.form["kv_cache_backend"],
-            ui.model_management.form["turboquant_bits"],
-        ],
-        outputs=[ui.model_management.form["turboquant_bits"]],
     ).then(
         fn=model_management_service.update_multimodal_ui_state,
         inputs=[
@@ -214,22 +205,12 @@ def bind_events(
             ui.model_management.form["detected_capabilities"],
         ],
     )
-    ui.model_management.form["kv_cache_backend"].change(
-        fn=model_management_service.update_turboquant_ui_state,
-        inputs=[
-            ui.model_management.form["kv_cache_backend"],
-            ui.model_management.form["turboquant_bits"],
-        ],
-        outputs=[ui.model_management.form["turboquant_bits"]],
-    )
     ui.model_management.form["add_button"].click(
         fn=model_management_service.add_model,
         inputs=[
             ui.model_management.form["model_name"],
             ui.model_management.form["mlx_repo"],
             ui.model_management.form["quantize"],
-            ui.model_management.form["kv_cache_backend"],
-            ui.model_management.form["turboquant_bits"],
             ui.model_management.form["default_language"],
             ui.model_management.form["system_prompt"],
             ui.model_management.form["multimodal_mode"],

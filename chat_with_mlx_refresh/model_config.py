@@ -22,8 +22,6 @@ class ModelConfig:
     default_language: str = "multi"
     system_prompt: Optional[str] = None
     multimodal_ability: list[str] = field(default_factory=list)
-    kv_cache_backend: str = "default"
-    turboquant_bits: Optional[int] = None
     display_name: Optional[str] = None
     custom_system_prompt: Optional[str] = field(default=None, repr=False, compare=False)
     config_path: Optional[Path] = field(default=None, repr=False, compare=False)
@@ -37,8 +35,6 @@ class ModelConfig:
             default_language=payload.get("default_language") or "multi",
             system_prompt=payload.get("system_prompt"),
             multimodal_ability=list(payload.get("multimodal_ability") or []),
-            kv_cache_backend=str(payload.get("kv_cache_backend") or "default"),
-            turboquant_bits=payload.get("turboquant_bits"),
             display_name=payload.get("display_name"),
         )
 
@@ -50,8 +46,6 @@ class ModelConfig:
             "default_language": self.default_language,
             "system_prompt": self.system_prompt,
             "multimodal_ability": list(self.multimodal_ability),
-            "kv_cache_backend": self.kv_cache_backend,
-            "turboquant_bits": self.turboquant_bits,
             "display_name": self.display_name,
         }
 
@@ -61,13 +55,8 @@ class ModelConfig:
         default_language: str,
         quantize: Optional[str],
         multimodal_ability: Optional[list[str]] = None,
-        kv_cache_backend: str = "default",
-        turboquant_bits: Optional[int] = None,
     ) -> str:
         parts = [default_language, quantize or "None"]
-        if (kv_cache_backend or "").strip().lower() == "turboquant":
-            bits = int(turboquant_bits) if turboquant_bits in {3, 4} else 4
-            parts.append(f"tq{bits}")
         if multimodal_ability:
             parts.append("+".join(multimodal_ability))
         return f"{model_name}({','.join(parts)})"
@@ -81,8 +70,6 @@ class ModelConfig:
             default_language=self.default_language,
             quantize=self.quantize,
             multimodal_ability=self.multimodal_ability,
-            kv_cache_backend=self.kv_cache_backend,
-            turboquant_bits=self.turboquant_bits,
         )
 
 
@@ -90,8 +77,6 @@ class ModelConfigStore:
     CAPABILITY_MODE_TEXT_ONLY = "Text only"
     CAPABILITY_MODE_AUTO_DETECT = "Auto detect"
     CAPABILITY_MODE_MANUAL_OVERRIDE = "Manual override"
-    KV_CACHE_BACKEND_DEFAULT = "default"
-    KV_CACHE_BACKEND_TURBOQUANT = "turboquant"
     VALID_CAPABILITY_MODES = frozenset(
         {
             CAPABILITY_MODE_TEXT_ONLY,
@@ -99,11 +84,9 @@ class ModelConfigStore:
             CAPABILITY_MODE_MANUAL_OVERRIDE,
         }
     )
-    VALID_KV_CACHE_BACKENDS = frozenset({KV_CACHE_BACKEND_DEFAULT, KV_CACHE_BACKEND_TURBOQUANT})
     VALID_QUANTIZE_TYPES = frozenset(
         {"None", "2bit", "3bit", "4bit", "5bit", "6bit", "8bit", "bf16", "bf32"}
     )
-    VALID_TURBOQUANT_BITS = frozenset({3, 4})
     VALID_LANGUAGES = frozenset({"multi"})
     VALID_MULTIMODAL_ABILITIES = frozenset({"vision", "audio"})
     MULTIMODAL_ABILITY_ORDER = ("vision", "audio")
@@ -163,53 +146,9 @@ class ModelConfigStore:
                 f"multimodal_mode must be one of {self.VALID_CAPABILITY_MODES}, got: '{multimodal_mode}'"
             )
 
-    def _validate_kv_cache_backend(self, kv_cache_backend: str) -> None:
-        if kv_cache_backend not in self.VALID_KV_CACHE_BACKENDS:
-            raise ValueError(
-                f"kv_cache_backend must be one of {self.VALID_KV_CACHE_BACKENDS}, got: '{kv_cache_backend}'"
-            )
-
-    def _validate_turboquant_bits(self, turboquant_bits: int) -> None:
-        if turboquant_bits not in self.VALID_TURBOQUANT_BITS:
-            raise ValueError(
-                f"turboquant_bits must be one of {self.VALID_TURBOQUANT_BITS}, got: '{turboquant_bits}'"
-            )
-
     @staticmethod
     def _extract_repo_name(repo: str) -> str:
         return repo.strip().split("/")[-1]
-
-    @classmethod
-    def normalize_kv_cache_backend(cls, value: Optional[str]) -> str:
-        normalized = str(value or cls.KV_CACHE_BACKEND_DEFAULT).strip().lower()
-        if normalized in cls.VALID_KV_CACHE_BACKENDS:
-            return normalized
-        return cls.KV_CACHE_BACKEND_DEFAULT
-
-    @classmethod
-    def normalize_turboquant_bits(cls, value: Any) -> Optional[int]:
-        if value in (None, ""):
-            return None
-        try:
-            normalized = int(value)
-        except (TypeError, ValueError):
-            return None
-        return normalized if normalized in cls.VALID_TURBOQUANT_BITS else None
-
-    def _normalize_kv_cache_config(
-        self,
-        kv_cache_backend: Optional[str],
-        turboquant_bits: Any,
-    ) -> tuple[str, Optional[int]]:
-        normalized_backend = self.normalize_kv_cache_backend(kv_cache_backend)
-        self._validate_kv_cache_backend(normalized_backend)
-        normalized_bits = self.normalize_turboquant_bits(turboquant_bits)
-        if normalized_backend == self.KV_CACHE_BACKEND_DEFAULT:
-            return normalized_backend, None
-        if normalized_bits is None:
-            normalized_bits = 4
-        self._validate_turboquant_bits(normalized_bits)
-        return normalized_backend, normalized_bits
 
     @classmethod
     def _slugify(cls, value: str) -> str:
@@ -311,8 +250,6 @@ class ModelConfigStore:
             default_language=model_config.default_language,
             quantize=model_config.quantize,
             multimodal_ability=model_config.multimodal_ability,
-            kv_cache_backend=model_config.kv_cache_backend,
-            turboquant_bits=model_config.turboquant_bits,
         )
 
     def get_config_path(self, model_config: ModelConfig) -> Path:
@@ -373,17 +310,11 @@ class ModelConfigStore:
         system_prompt: Optional[str] = None,
         multimodal_mode: str = CAPABILITY_MODE_TEXT_ONLY,
         multimodal_ability_override: Optional[list[str]] = None,
-        kv_cache_backend: str = KV_CACHE_BACKEND_DEFAULT,
-        turboquant_bits: Optional[int] = None,
     ) -> ModelConfig:
         self._validate_repo_format(mlx_repo, "mlx_repo")
         self._validate_quantize(quantize)
         self._validate_language(default_language)
         self._validate_capability_mode(multimodal_mode)
-        normalized_kv_cache_backend, normalized_turboquant_bits = self._normalize_kv_cache_config(
-            kv_cache_backend,
-            turboquant_bits,
-        )
 
         normalized_override = self._process_multimodal_abilities(multimodal_ability_override)
         self._validate_multimodal_ability(normalized_override)
@@ -406,9 +337,6 @@ class ModelConfigStore:
                 raise ValueError("Select at least one ability when using Manual override.")
             resolved_multimodal_ability = normalized_override
 
-        if resolved_multimodal_ability and normalized_kv_cache_backend == self.KV_CACHE_BACKEND_TURBOQUANT:
-            raise ValueError("TurboQuant is currently only available for text-only models.")
-
         config = ModelConfig(
             mlx_repo=mlx_repo.strip(),
             model_name=(model_name.strip() if model_name else self._extract_repo_name(mlx_repo)),
@@ -416,8 +344,6 @@ class ModelConfigStore:
             default_language=default_language,
             system_prompt=system_prompt.strip() if system_prompt else None,
             multimodal_ability=resolved_multimodal_ability,
-            kv_cache_backend=normalized_kv_cache_backend,
-            turboquant_bits=normalized_turboquant_bits,
         )
         config.display_name = self._generate_display_name(config)
         if config.resolved_display_name in self.load_configs():
@@ -463,10 +389,6 @@ class ModelConfigStore:
 
         self._validate_multimodal_ability(model_config.multimodal_ability)
         model_config.multimodal_ability = self._process_multimodal_abilities(model_config.multimodal_ability)
-        (
-            model_config.kv_cache_backend,
-            model_config.turboquant_bits,
-        ) = self._normalize_kv_cache_config(model_config.kv_cache_backend, model_config.turboquant_bits)
         model_config.display_name = self._generate_display_name(model_config)
         return model_config
 
